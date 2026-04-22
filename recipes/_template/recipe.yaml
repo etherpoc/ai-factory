@@ -1,0 +1,47 @@
+# Universal Agent Factory - recipe template
+# Copy this directory to recipes/<type>/ and edit the marked fields.
+
+meta:
+  type: PLACEHOLDER-TYPE # 例: "my-cli", "my-web-app" — directory name と一致させる
+  version: 0.1.0
+  description: PLACEHOLDER — このレシピで生成するプロジェクト種別の一行説明
+
+stack:
+  language: typescript
+  framework: PLACEHOLDER # 例: "nextjs", "phaser3", "react-native"
+  deps: []
+
+scaffold:
+  # template: recipes/<type>/<path> 以下を worktree にコピー
+  # generator: command を worktree cwd で実行（例: "npx create-next-app@latest ."）
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      # TODO: このスタックでの実装規約をここに書く
+      # - ディレクトリ構成 / 命名 / ライフサイクル
+      # - 使わないパターン（禁止事項）
+  tester:
+    promptAppend: |
+      # TODO: テストランナーと最低カバレッジ、E2E の主要シナリオ
+
+build:
+  command: 'pnpm build'
+  timeoutSec: 180
+
+test:
+  command: 'pnpm test'
+  timeoutSec: 300
+
+evaluation:
+  criteria:
+    - id: builds
+      description: ビルドコマンドが 0 で終了する
+      required: true
+    - id: tests-pass
+      description: テストコマンドが全通過する
+      required: true
+    # id は決定論的に評価できるものだけを列挙する。
+    # evaluator エージェントの判定一覧は agents/evaluator/prompt.md を参照。

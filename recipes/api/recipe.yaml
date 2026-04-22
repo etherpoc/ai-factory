@@ -1,0 +1,79 @@
+meta:
+  type: api
+  version: 1.0.0
+  description: Hono + TypeScript + Node.js による最小構成の REST API サーバ（Vitest 統合テスト付き）
+
+stack:
+  language: typescript
+  framework: hono
+  deps:
+    - hono
+    - '@hono/node-server'
+    - typescript
+    - vite
+    - vitest
+    - '@vitest/coverage-v8'
+    - supertest
+    - '@types/supertest'
+    - tsx
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      Hono + Node.js の実装規約に従うこと:
+      - エントリポイントは `src/index.ts`。`serve()` 呼び出しを含むが、テスト時に app をインポートしやすいよう `app` を named export すること
+      - ルート定義は `src/routes/<resource>.ts` に分割し、`app.route('/path', router)` でマウント
+      - 共通エラーハンドリングは `app.onError()` で 1 箇所に集約する
+      - レスポンスは必ず `c.json({ ... }, status)` で返す（Response オブジェクトを直接生成しない）
+      - バリデーションが必要なら `@hono/zod-validator` + `zod` を使う（追加インストール可）
+      - `src/index.ts` は `IS_TEST` 環境変数または `NODE_ENV === 'test'` のとき `serve()` を呼ばない
+        （テストランナーが listen せずに `app` をインポートできるようにするため）
+      - 型は `any` を書かない。Hono の `Context` / `Env` 型を活用する
+      - ログは `console.error` ではなく `process.stderr.write` か構造化ログ
+  tester:
+    promptAppend: |
+      Vitest + supertest 相当の統合テストを `tests/*.test.ts` に書くこと:
+      - `@hono/node-server` の `testClient` または Node の `http.createServer` + supertest でリクエストを送る
+        推奨: `import { testClient } from 'hono/testing'` を使う（supertest 不要で型安全）
+      - 最低 3 シナリオ:
+        1. **ヘルスチェック**: `GET /health` → `{ status: 'ok' }` と HTTP 200
+        2. **リソース CRUD**: 主要エンドポイントの正常系（POST でリソース作成 → GET で取得）
+        3. **エラー系**: 存在しないリソースへの GET → 404 / バリデーション失敗 → 400
+      - 決定論性のために ID 生成はモックまたは固定シード（`vi.mock` / `vi.spyOn` を使う）
+      - `describe` ブロックで機能ごとにグループ化し、各テストは独立して実行できること
+      - カバレッジターゲット: 行カバレッジ 70 % 以上（`vitest run --coverage` が確認コマンド）
+
+build:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec tsc --noEmit'
+  timeoutSec: 180
+
+test:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec vitest run --reporter=verbose'
+  timeoutSec: 300
+
+evaluation:
+  entrypoints:
+    - src/index.ts
+    - src/routes/health.ts
+  criteria:
+    - id: builds
+      description: tsc --noEmit がエラーなく完了
+      required: true
+    - id: tests-pass
+      description: vitest run が全スイート通過
+      required: true
+    - id: entrypoints-implemented
+      description: src/index.ts および src/routes/health.ts が雛形から変更されている
+      required: true
+    - id: health-endpoint
+      description: GET /health が { status 'ok' } を返す実装が存在する
+      required: false
+
+# Phase 11.a: APIs benefit from writer (OpenAPI description, error messages).
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [writer]

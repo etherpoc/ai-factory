@@ -1,0 +1,48 @@
+{
+  "name": "uaf-desktop-app",
+  "private": true,
+  "version": "0.0.1",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:main": "tsc -p tsconfig.main.json --watch",
+    "dev": "concurrently \"pnpm dev:renderer\" \"pnpm dev:main\"",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build": "pnpm build:main && pnpm build:renderer",
+    "start": "electron .",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.4.6",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "jsdom": "^24.1.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.3",
+    "vitest": "^2.0.3"
+  },
+  "build": {
+    "appId": "com.uaf.desktop-app",
+    "productName": "UAF Desktop App",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    }
+  }
+}

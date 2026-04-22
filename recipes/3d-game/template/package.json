@@ -1,0 +1,21 @@
+{
+  "name": "uaf-3d-game",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 4173",
+    "test": "playwright test --reporter=line"
+  },
+  "dependencies": {
+    "three": "^0.165.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.45.0",
+    "@types/three": "^0.165.0",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.0"
+  }
+}

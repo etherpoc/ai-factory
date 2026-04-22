@@ -1,0 +1,81 @@
+meta:
+  type: web-app
+  version: 1.0.0
+  description: Next.js 14 App Router + TypeScript + Tailwind によるモダンな Web アプリ
+
+stack:
+  language: typescript
+  framework: nextjs
+  deps:
+    - next
+    - react
+    - react-dom
+    - typescript
+    - tailwindcss
+    - postcss
+    - autoprefixer
+    - '@playwright/test'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      Next.js 14 (App Router) の規約に従うこと:
+      - ルートは `app/` 配下に `page.tsx` / `layout.tsx` で配置
+      - **Server Components を既定**とし、イベントハンドラや `useState`/`useEffect` が必要なときだけ `'use client'` を付ける
+      - API は `app/api/<route>/route.ts` の Route Handler で実装（`GET`/`POST` 等を export）
+      - Tailwind のクラスで書く。CSS モジュールは必要最小限
+      - フォームは Server Actions (`'use server'`) を優先し、やむを得ない場合のみ fetch
+      - データ取得はキャッシュ可能な fetch + `cache` or `unstable_cache`。Route Handler で DB 触るときは `revalidatePath` / `revalidateTag` を使う
+      - アクセシビリティ: インタラクティブ要素に適切な ARIA 属性と `data-testid`
+  tester:
+    promptAppend: |
+      Playwright E2E は `tests/e2e/*.spec.ts`。最低 3 主要ユーザーフロー:
+      1. **初回訪問**: `/` を開き、主要 UI が描画される
+      2. **ユーザー操作**: CRUD 系ならアイテム追加→表示、リスト操作で DOM が更新される
+      3. **エッジ**: 空状態 / バリデーションエラー / ローディング完了の 1 つ以上
+      `webServer.command` は `pnpm start`（本番ビルドのサーバ）を使い、`pnpm build` を前段に置く。
+      モバイル・デスクトップ両対応を `projects` で確認（`Desktop Chrome` と `iPhone 14`）。
+      セレクタは `data-testid` を優先し、見た目変更に強いテストにする。
+
+build:
+  # --ignore-workspace: 生成プロジェクトが UAF 側の pnpm workspace の子として扱われるのを避ける
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec next build'
+  timeoutSec: 300
+
+test:
+  command: 'pnpm --ignore-workspace exec playwright install chromium && pnpm --ignore-workspace exec playwright test --reporter=line'
+  timeoutSec: 600
+
+evaluation:
+  entrypoints:
+    - app/page.tsx
+  criteria:
+    - id: builds
+      description: next build がエラーなく完了
+      required: true
+    - id: tests-pass
+      description: Playwright E2E が全通過（smoke + interaction）
+      required: true
+    - id: entrypoints-implemented
+      description: app/page.tsx が雛形から変更されている
+      required: true
+    - id: responsive
+      description: モバイル・デスクトップ双方のビューポートで主要フローが通る
+      required: false
+
+# Phase 11.a: web apps benefit from copy + OG image. No audio.
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [writer, artist, critic]
+
+assets:
+  image:
+    defaultStyle: illustration
+    defaultProvider: replicate
+    budget:
+      maxUsd: 0.50
+      maxCount: 5

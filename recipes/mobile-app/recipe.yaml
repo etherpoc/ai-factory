@@ -1,0 +1,151 @@
+meta:
+  type: mobile-app
+  version: 1.0.0
+  description: React Native + Expo (expo-router) + TypeScript + jest-expo による Android/iOS 共通モバイルアプリ
+
+stack:
+  language: typescript
+  framework: react-native
+  deps:
+    - expo
+    - expo-router
+    - react-native
+    - react
+    - typescript
+    - jest-expo
+    - '@testing-library/react-native'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      ## React Native + Expo 実装規約
+
+      ### ディレクトリ構成
+      - `app/`               — expo-router のルートディレクトリ
+        - `_layout.tsx`      — ルートレイアウト（Stack / Tabs 設定）
+        - `index.tsx`        — ホーム画面（/ ルート）
+        - `(tabs)/`          — タブナビゲーションを使う場合
+      - `src/components/`    — 再利用可能なコンポーネント
+      - `src/hooks/`         — カスタムフック
+      - `src/lib/`           — ビジネスロジック（純粋関数、React 非依存）
+      - `src/__tests__/`     — Jest テストファイル (*.test.tsx / *.test.ts)
+      - `assets/`            — 画像・フォント等のアセット
+
+      ### エントリポイント契約（Tester が依存する）
+      - `app/index.tsx` は testID として `testID="home-screen"` を root View に付ける
+      - 各画面コンポーネントは `export default function <ScreenName>Screen()` で export する
+      - `src/lib/` 内のビジネスロジックは named export で export し、React に依存させない
+      - カスタムフックは `use<Name>` 命名規則に従い `src/hooks/use<Name>.ts` に配置する
+
+      ### UI / スタイリング
+      - StyleSheet.create() を使い、インラインスタイルを最小化する
+      - コンポーネントの testID は `kebab-case` で統一する（例: `testID="submit-button"`）
+      - プラットフォーム分岐は `Platform.select()` / `Platform.OS` を使う
+      - アクセシビリティ: `accessibilityLabel` / `accessibilityRole` を主要インタラクティブ要素に付ける
+
+      ### ナビゲーション
+      - expo-router のファイルベースルーティングを使う
+      - 画面遷移は `router.push('/<route>')` / `<Link href="/<route>">` を使う
+      - 直接 react-navigation の NavigationContainer を使わない（expo-router が管理する）
+
+      ### 使ってよいライブラリ
+      - expo-router（ナビゲーション）
+      - expo-status-bar（ステータスバー制御）
+      - @expo/vector-icons（アイコン）
+      - expo-constants（定数アクセス）
+      - react-native 組み込みコンポーネント（View / Text / TextInput / FlatList 等）
+
+      ### 使わないライブラリ
+      - react-navigation を直接使わない（expo-router 経由で統一）
+      - class コンポーネント禁止（関数コンポーネント + Hooks に統一）
+      - any 禁止（unknown + type guard で narrowing）
+
+      ### エラー処理・非同期処理
+      - async/await を統一して使い、callback スタイルは禁止
+      - fetch / API 呼び出しは必ず try/catch し、エラー状態を UI に反映する
+      - ErrorBoundary を app/_layout.tsx のトップに配置する
+
+  tester:
+    promptAppend: |
+      ## React Native + jest-expo テスト規約
+
+      ### テストランナー
+      - jest-expo（`pnpm --ignore-workspace exec jest --passWithNoTests` で実行）
+      - テストファイルは `src/__tests__/*.test.tsx` または `src/__tests__/*.test.ts`
+      - セットアップファイルは `src/__tests__/setup.ts`
+
+      ### テスト方法
+      - コンポーネントテストは `@testing-library/react-native` の `render` を使う
+      - 画面コンポーネントは expo-router の `renderRouter` または通常の `render` でテスト
+      - ビジネスロジック（src/lib/）は React 非依存なので直接 import してユニットテスト
+      - カスタムフックは `renderHook` でテストする
+
+      ### 必須シナリオ（最低 3 件）
+      1. **ホーム画面レンダリング**: `render(<HomeScreen />)` して `testID="home-screen"` の要素が存在する
+      2. **主要 UI インタラクション**: ボタン押下・テキスト入力などのユーザー操作をシミュレートして状態変化を確認
+      3. **ビジネスロジック**: `src/lib/` の純粋関数を直接テスト（正常系 + 異常系）
+      4. **ナビゲーション**: expo-router の `renderRouter` を使い、ルート遷移を確認（可能な場合）
+
+      ### セレクタ優先順位
+      1. `getByTestId('test-id')` — testID ベース（最優先）
+      2. `getByRole('button', { name: 'ラベル' })` — ARIA ロールベース
+      3. `getByText('テキスト')` — テキストベース（最終手段）
+
+      ### 決定論性の担保
+      - 日時依存は `jest.useFakeTimers()` で固定する
+      - ランダム性は `jest.spyOn(Math, 'random').mockReturnValue(0.5)` でスタブする
+      - 非同期処理は `act()` / `waitFor()` / `findBy*` を使い、実際の時間に依存しない
+      - ネイティブモジュールは `__mocks__/` または jest.mock() でスタブする
+
+      ### モックの書き方
+      - expo-router は jest-expo が自動モックするため原則不要
+      - ネイティブ API (expo-camera 等) は `jest.mock('expo-camera')` でスタブ
+      - fetch は `jest.spyOn(global, 'fetch').mockResolvedValue(...)` でスタブ
+
+build:
+  # TypeScript 型チェックのみ（Expo の実機ビルドは EAS Build で行うため）
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec tsc --noEmit'
+  timeoutSec: 180
+
+test:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec jest --passWithNoTests --forceExit'
+  timeoutSec: 300
+
+evaluation:
+  # これらのファイルが scaffold の stub のまま（byte 一致）だと entrypoints-implemented が落ちる
+  entrypoints:
+    - app/index.tsx
+    - app/_layout.tsx
+  criteria:
+    - id: builds
+      description: 'tsc --noEmit がエラーなく完了する（型エラーがない）'
+      required: true
+    - id: tests-pass
+      description: 'jest --passWithNoTests が全テスト通過する'
+      required: true
+    - id: entrypoints-implemented
+      description: 'app/index.tsx と app/_layout.tsx が scaffold の stub から変更されている'
+      required: true
+    - id: testid-present
+      description: 'home-screen testID を持つ要素が描画される'
+      required: false
+    - id: no-any
+      description: 'TypeScript の any 使用がゼロ（tsc strict で検出）'
+      required: false
+
+# Phase 11.a: mobile apps need writer + app icon. No audio.
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [writer, artist, critic]
+
+assets:
+  image:
+    defaultStyle: icon
+    defaultProvider: replicate
+    budget:
+      maxUsd: 0.30
+      maxCount: 3

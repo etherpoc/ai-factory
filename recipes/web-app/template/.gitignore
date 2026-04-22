@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+.vercel
+.pnpm-store
+test-results
+playwright-report
+blob-report
+*.log
+next-env.d.ts

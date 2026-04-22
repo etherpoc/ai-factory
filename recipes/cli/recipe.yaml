@@ -1,0 +1,123 @@
+meta:
+  type: cli
+  version: 1.0.0
+  description: Node.js 製 CLI ツール（TypeScript + commander + tsx + vitest）
+
+stack:
+  language: typescript
+  framework: commander
+  deps:
+    - commander
+    - chalk
+    - tsx
+    - typescript
+    - vitest
+    - '@types/node'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      ## CLI スタック実装規約
+
+      ### ディレクトリ構成
+      - `src/cli.ts`       — エントリポイント。shebang + program 定義
+      - `src/commands/`    — サブコマンドごとに 1 ファイル（例: `src/commands/greet.ts`）
+      - `src/lib/`         — ビジネスロジック（コマンドに依存しない純粋関数）
+      - `src/__tests__/`   — Vitest テストファイル（*.test.ts）
+
+      ### エントリポイント契約（Tester が依存する）
+      - `src/cli.ts` は `export const program` を named export すること（テストから import 可能にする）
+      - 各コマンドハンドラは `src/commands/<name>.ts` から `export function handle<Name>()` で export すること
+      - 正常終了は exit code 0、エラー時は `process.exit(1)` して stderr にメッセージを出力すること
+      - `--version` フラグは `package.json` の version を返すこと（`program.version(pkg.version)`）
+
+      ### 使ってよいライブラリ
+      - commander（コマンド定義）
+      - chalk（カラー出力）
+      - tsx（TypeScript を直接実行）
+
+      ### 使わないライブラリ
+      - yargs（commander に統一）
+      - oclif（重量級フレームワークは使わない）
+      - inquirer（インタラクティブ入力が spec に明記されていない限り不要）
+
+      ### エラー処理・非同期処理
+      - async コマンドハンドラは必ず try/catch し、catch 内で `console.error()` + `process.exit(1)`
+      - Promise を返す関数は async/await で統一（callback スタイル禁止）
+      - unhandledRejection は src/cli.ts のトップで `process.on('unhandledRejection', ...)` でキャッチする
+
+      ### 型
+      - `any` 禁止。`unknown` + type guard で narrowing する
+      - commander の option は `{ myOption: string }` 等の interface を定義して受け取る
+
+  tester:
+    promptAppend: |
+      ## CLI スタック テスト規約
+
+      ### テストランナー
+      - Vitest（`pnpm --ignore-workspace test` で実行）
+      - テストファイルは `src/__tests__/*.test.ts`
+
+      ### テスト方法
+      - ユニットテストは `src/lib/` の純粋関数を直接 import してテスト
+      - コマンドテストは `program.parseAsync(['node','cli', ...args])` を呼び出し、
+        stdout/stderr をキャプチャするヘルパー関数でテスト（下記参照）
+      - E2E が必要な場合は `execa` / Node.js の `child_process.execFile` でバイナリ実行
+
+      ### 標準キャプチャヘルパーのパターン
+      ```
+      import { vi } from 'vitest'
+      const captured = { out: '', err: '' }
+      vi.spyOn(process.stdout, 'write').mockImplementation((s) => { captured.out += s; return true })
+      vi.spyOn(process.stderr, 'write').mockImplementation((s) => { captured.err += s; return true })
+      ```
+
+      ### 必須シナリオ（最低 3 件）
+      1. `--help` を渡したとき exit code 0 でヘルプテキストが出力される
+      2. `--version` を渡したとき package.json の version 文字列が出力される
+      3. 仕様書（spec.md）が定義するメインコマンドが正しい出力を返す
+      4. 不正な引数を渡したとき exit code 1 で stderr にエラーが出る
+
+      ### 決定論性の担保
+      - 日時依存のロジックは `vi.useFakeTimers()` で固定する
+      - ファイルシステムアクセスは `vi.mock('node:fs')` または一時ディレクトリを使用する
+      - 外部コマンド呼び出しは `vi.mock('child_process')` でスタブする
+
+build:
+  # Manually patched after recipe-builder run: F1 requires --ignore-workspace AND install first
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec tsc --noEmit'
+  timeoutSec: 180
+
+test:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec vitest run'
+  timeoutSec: 180
+
+evaluation:
+  entrypoints:
+    - src/cli.ts
+    - src/commands/index.ts
+  criteria:
+    - id: builds
+      description: 'pnpm build が exit code 0 で完了する（tsc でエラーがない）'
+      required: true
+    - id: tests-pass
+      description: 'pnpm test --run が全テスト通過する'
+      required: true
+    - id: entrypoints-implemented
+      description: 'src/cli.ts と src/commands/index.ts が scaffold の stub のままでない'
+      required: true
+    - id: help-exits-zero
+      description: 'node dist/cli.js --help が exit code 0 で終了する'
+      required: false
+    - id: version-flag
+      description: 'node dist/cli.js --version が package.json の version を出力する'
+      required: false
+
+# Phase 11.a: CLI tools only need writer (help text, README). No visuals/audio.
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [writer]

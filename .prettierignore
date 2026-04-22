@@ -1,0 +1,8 @@
+node_modules
+dist
+workspace
+pnpm-lock.yaml
+
+# Spec originals — kept as-authored.
+CLAUDE_CODE_PROMPT.md
+docs/spec.md

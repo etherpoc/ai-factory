@@ -1,0 +1,82 @@
+meta:
+  type: 2d-game
+  version: 1.0.0
+  description: Phaser 3 + TypeScript + Vite による 2D ブラウザゲーム
+
+stack:
+  language: typescript
+  framework: phaser3
+  deps:
+    - phaser
+    - vite
+    - typescript
+    - '@playwright/test'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      Phaser 3 の Scene パターンに従うこと:
+      - 各シーンは `src/scenes/<Name>Scene.ts` に `class extends Phaser.Scene` として配置
+      - init/preload/create/update のライフサイクルを使い分ける
+      - アセットは `public/` 配下に置き、相対パスで `this.load.image(key, path)` する
+      - 物理は arcade physics を既定とする。`this.physics.add.sprite()` でスプライトを作る
+      - シーン遷移は `this.scene.start('SceneKey')` を使い、直接 new しない
+      - `src/main.ts` で `new Phaser.Game(config)` し、scene 配列に全シーンを列挙する
+      - 描画ターゲットは `#game` 要素（index.html に存在）
+  tester:
+    promptAppend: |
+      Playwright E2E は `tests/e2e/*.spec.ts` に配置。最低 3 シナリオ:
+      1. **起動**: `page.goto('/')` → `canvas` が描画されるまで待つ
+      2. **操作**: `page.keyboard.press('ArrowLeft')` などでゲーム状態が変わることを観測
+      3. **終了**: ゲームオーバーまたはクリア表示に到達できる（到達不能なゲームは禁止）
+      Playwright の `webServer.command` は `pnpm preview` を使い、ヘッドレスで回す。
+      スクリプトに乱数が絡む場合はシード値を固定する（`Math.random` を直接使わず、Phaser の乱数 API に seed を渡す）。
+
+build:
+  # --ignore-workspace: 生成プロジェクトが UAF 側の pnpm workspace の子として扱われるのを避ける
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec vite build'
+  timeoutSec: 300
+
+test:
+  command: 'pnpm --ignore-workspace exec playwright install chromium && pnpm --ignore-workspace exec playwright test --reporter=line'
+  timeoutSec: 600
+
+evaluation:
+  # 以下のファイルは scaffold の雛形のまま（byte 一致）だと entrypoints-implemented が落ちる。
+  # 空 scaffold が満点を取らないようにする deterministic check。
+  entrypoints:
+    - src/scenes/MainScene.ts
+  criteria:
+    - id: builds
+      description: vite build がエラーなく完了
+      required: true
+    - id: tests-pass
+      description: Playwright E2E の全スイート通過（smoke + gameplay）
+      required: true
+    - id: entrypoints-implemented
+      description: src/scenes/MainScene.ts が雛形から変更されている
+      required: true
+
+# Phase 11.a: creative agents + asset budget.
+# required は従来の6体、optional は Phase 11.a で追加した3体（writer/critic は
+# ゲームでは不要なので除外、artist/sound/critic を有効化）。
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [artist, sound, critic]
+
+assets:
+  image:
+    defaultStyle: pixel-art
+    defaultProvider: replicate
+    budget:
+      maxUsd: 1.50
+      maxCount: 20
+  audio:
+    defaultProvider: elevenlabs
+    budget:
+      maxUsd: 0.50
+      maxCount: 10

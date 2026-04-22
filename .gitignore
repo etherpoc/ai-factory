@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Generated projects (isolated worktrees live here)
+workspace/
+
+# Recipe-builder atomic staging dir (Phase 5) — tmp dirs are created and deleted by meta/recipe-builder.ts
+recipes/.tmp/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code local state (user-specific permission allowlist, session data)
+.claude/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test / coverage
+coverage/
+.vitest-cache/

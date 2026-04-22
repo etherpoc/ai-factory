@@ -1,0 +1,169 @@
+meta:
+  type: desktop-app
+  version: 1.0.0
+  description: Electron + TypeScript + React デスクトップアプリ（macOS/Windows/Linux 共通）
+
+stack:
+  language: typescript
+  framework: electron
+  deps:
+    - electron
+    - react
+    - react-dom
+    - typescript
+    - vite
+    - '@vitejs/plugin-react'
+    - electron-builder
+    - vitest
+    - '@testing-library/react'
+    - '@testing-library/jest-dom'
+    - '@testing-library/user-event'
+    - jsdom
+    - '@types/react'
+    - '@types/react-dom'
+    - '@types/node'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      Electron + React (Vite) のプロジェクト構成規約:
+
+      ## ディレクトリ構成
+      - `src/main/`   — Electron メインプロセス（Node.js 環境）
+        - `main.ts`   — BrowserWindow 生成・アプリ起動
+        - `preload.ts` — contextBridge で renderer に API を公開
+      - `src/renderer/` — React レンダラープロセス（ブラウザ環境）
+        - `main.tsx`  — ReactDOM.createRoot エントリ
+        - `App.tsx`   — ルートコンポーネント
+        - `components/` — 再利用コンポーネント
+      - `src/shared/`  — main/renderer 双方から参照できる型定義・定数
+      - `tests/main/`  — メインプロセスのユニットテスト（Vitest + Node 環境）
+      - `tests/renderer/` — レンダラーの React コンポーネントテスト（Vitest + jsdom）
+
+      ## プロセス間通信 (IPC)
+      - メインプロセス側: `ipcMain.handle('channel', handler)` で非同期 API を定義
+      - preload.ts: `contextBridge.exposeInMainWorld('api', { ... })` で安全に公開
+      - レンダラー側: `window.api.xxx()` を呼び出す
+      - **`nodeIntegration: false` / `contextIsolation: true` を必ず維持すること**
+      - renderer から Node.js API を直接呼ばない
+
+      ## 型安全性
+      - preload で公開する API の型は `src/shared/preload-api.d.ts` に `interface ElectronAPI` として定義し、
+        `src/renderer/env.d.ts` で `Window` インターフェースを拡張する:
+        ```
+        declare global {
+          interface Window { api: import('./preload-api').ElectronAPI; }
+        }
+        ```
+      - `any` を使わない。IPC のペイロード型は shared/ に定義する。
+
+      ## Vite ビルド構成
+      - レンダラーのビルドは Vite (`vite build`)
+      - メインプロセス・preload のビルドは `tsc -p tsconfig.main.json` (target: CommonJS or ESNext + CJS interop)
+      - `dist/main/` にメインプロセス JS、`dist/renderer/` にレンダラー HTML/JS を出力
+
+      ## 必須テストコントラクト（Tester が依存する命名）
+      - 対話 UI を持つ場合は以下の `data-testid` を付ける（renderer テストで参照）:
+        - `app-title` — アプリ名 h1 等
+        - `primary-input` — 主要な入力欄
+        - `primary-action` — 主要なアクションボタン
+        - `item-list` — アイテム一覧コンテナ
+        - `item-entry` — 各アイテム要素
+        - `item-delete` — 各アイテムの削除ボタン
+      - ドメインに合わせた命名に読み替えてよいが、`data-testid` を必ず付ける
+
+      ## スタイル
+      - CSS Modules (`*.module.css`) を優先する（Tailwind は依存に含まれない）
+      - グローバルスタイルは `src/renderer/styles/global.css`
+
+      ## エラー処理
+      - メインプロセスの未処理例外は `process.on('uncaughtException', ...)` でログ出力
+      - IPC handler 内の非同期エラーは必ず try/catch して renderer にエラー情報を返す
+      - renderer 側は IPC 呼び出しを try/catch してユーザーに通知する
+
+  tester:
+    promptAppend: |
+      Vitest によるメインプロセス + レンダラー双方のユニットテスト。
+
+      ## テスト構成
+      - `tests/main/*.test.ts`     — Node.js 環境（Vitest environment: 'node'）
+      - `tests/renderer/*.test.tsx` — jsdom 環境（Vitest environment: 'jsdom'）
+      - `vitest.config.ts` に 2 つの project を設定（下記参照）
+
+      ## 最低カバレッジシナリオ（必須 3 件以上）
+
+      ### renderer テスト
+      1. **初期描画** — `<App />` をレンダリングし `data-testid="app-title"` が存在すること
+      2. **ユーザー操作** — `primary-input` に入力 → `primary-action` クリック → `item-entry` が増えること
+      3. **削除操作** — `item-delete` クリックで該当アイテムが消えること
+
+      ### main テスト
+      4. **IPC ハンドラ** — `ipcMain.handle` のコールバック関数を直接呼び出し、正しい値を返すこと
+         （electron モジュールは vi.mock でモックする）
+
+      ## Vitest 設定（vitest v2 対応）
+      vitest v2 では projects 内の environment 指定に制限があるため、
+      ファイル先頭の docblock でランタイムを切り替える:
+      - `tests/renderer/*.test.tsx` の先頭に `// @vitest-environment jsdom` を付ける
+      - `tests/main/*.test.ts` はデフォルト node 環境
+      - `@testing-library/jest-dom` は必ず `@testing-library/jest-dom/vitest` サブパスでインポート
+
+      ## renderer テストの先頭テンプレート
+      ```ts
+      // @vitest-environment jsdom
+      import '@testing-library/jest-dom/vitest';
+      import { cleanup, render, screen } from '@testing-library/react';
+      import { afterEach, describe, expect, it, vi } from 'vitest';
+      // window.api のモック（preload がない jsdom 環境用）
+      Object.assign(window, { api: { /* vi.fn() でスタブ */ } });
+      afterEach(() => cleanup());
+      ```
+
+      ## 決定性
+      - `Math.random()` を使う場合は `vi.spyOn(Math, 'random').mockReturnValue(0.5)`
+      - 日付固定: `vi.setSystemTime(new Date('2026-01-01'))`
+      - `electron` モジュールは `vi.mock('electron', ...)` で完全モックする
+      - タイムアウト依存の sleep / setInterval は `vi.useFakeTimers()` で制御する
+
+build:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec tsc -p tsconfig.main.json --noEmit && pnpm --ignore-workspace exec vite build'
+  timeoutSec: 300
+
+test:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec vitest run'
+  timeoutSec: 300
+
+evaluation:
+  entrypoints:
+    - src/renderer/App.tsx
+    - src/main/main.ts
+  criteria:
+    - id: builds
+      description: tsc (main) と vite build (renderer) がエラーなく完了
+      required: true
+    - id: tests-pass
+      description: Vitest が renderer + main 両プロジェクトで全通過
+      required: true
+    - id: entrypoints-implemented
+      description: src/renderer/App.tsx と src/main/main.ts が雛形から変更されている
+      required: true
+    - id: ipc-contract
+      description: preload.ts が contextBridge 経由で API を公開し contextIsolation が有効
+      required: false
+
+# Phase 11.a: desktop apps need writer + app icon. No critic/audio for now.
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [writer, artist]
+
+assets:
+  image:
+    defaultStyle: icon
+    defaultProvider: replicate
+    budget:
+      maxUsd: 0.20
+      maxCount: 2

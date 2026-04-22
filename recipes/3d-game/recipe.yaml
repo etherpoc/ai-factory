@@ -1,0 +1,82 @@
+meta:
+  type: 3d-game
+  version: 1.0.0
+  description: Three.js + Vite + Playwright による 3D ブラウザゲーム
+
+stack:
+  language: typescript
+  framework: threejs
+  deps:
+    - three
+    - vite
+    - typescript
+    - '@playwright/test'
+    - '@types/three'
+
+scaffold:
+  type: template
+  path: template
+
+agentOverrides:
+  programmer:
+    promptAppend: |
+      Three.js の Scene パターンに従うこと:
+      - 各シーン相当のロジックは `src/scenes/<Name>Scene.ts` に配置し、`init()` / `update(delta)` / `dispose()` メソッドを持つクラスとする
+      - `src/main.ts` で `THREE.WebGLRenderer` を作り、`#game` 要素に append する
+      - アニメーションループは `renderer.setAnimationLoop(callback)` を使う（`requestAnimationFrame` の直接呼び出しは禁止）
+      - カメラは `THREE.PerspectiveCamera`、アスペクト比は resize イベントで追従させる
+      - 物理は使わなくてよい。簡易な AABB や速度ベクトルを自前で計算する
+      - アセット（テクスチャ等）は `public/assets/` に置き、`THREE.TextureLoader` でロードする
+      - 入力は `document.addEventListener('keydown'/'keyup', ...)` で管理し、入力状態を `Set<string>` で保持する
+      - テストから観測できるよう、重要なゲーム状態を DOM に `data-testid` で出力すること
+      - **必須コントラクト (gameplay.spec.ts が依存)**: プレイヤーに相当するオブジェクトの X 座標を `<div data-testid="player" data-x="<X 座標>">` として DOM に出力し、ArrowLeft / ArrowRight の入力で `data-x` の数値が増減するよう毎フレーム更新すること
+      - **必須コントラクト**: ゲームオーバー・クリア到達時は `<div data-testid="game-over">` を DOM に追加し、テストから終端到達を検証可能にする
+      - 乱数は `Math.random()` を直接使わず、シード付き乱数関数（`src/utils/rng.ts` に `seededRandom(seed)` を実装）を使う。シードは `window.__uafSeed ?? 42` から取る
+  tester:
+    promptAppend: |
+      Playwright E2E は `tests/e2e/*.spec.ts` に配置。最低 3 シナリオ:
+      1. **起動**: `page.goto('/')` → `canvas` が描画されるまで待つ（`[data-testid="scene-ready"]` が DOM に付くまで待機）
+      2. **操作**: `page.keyboard.press('ArrowLeft')` / `ArrowRight` でプレイヤーの `data-x` が変化することを確認
+      3. **終了**: ゲームオーバーまたはクリア表示（`[data-testid="game-over"]`）に到達できる
+      Playwright の `webServer.command` は `pnpm preview` を使い、ヘッドレスで回す。
+      シード固定は `page.addInitScript(() => { window.__uafSeed = 42; })` で行う。
+
+build:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec vite build'
+  timeoutSec: 300
+
+test:
+  command: 'pnpm install --prefer-offline --ignore-workspace && pnpm --ignore-workspace exec playwright install chromium && pnpm --ignore-workspace exec playwright test --reporter=line'
+  timeoutSec: 600
+
+evaluation:
+  entrypoints:
+    - src/scenes/MainScene.ts
+  criteria:
+    - id: builds
+      description: vite build がエラーなく完了
+      required: true
+    - id: tests-pass
+      description: Playwright E2E の全スイート通過（smoke + gameplay）
+      required: true
+    - id: entrypoints-implemented
+      description: src/scenes/MainScene.ts が雛形から変更されている
+      required: true
+
+# Phase 11.a: 3D games use textures + ambient audio. No writer (no UI copy).
+agents:
+  required: [director, architect, programmer, tester, reviewer, evaluator]
+  optional: [artist, sound, critic]
+
+assets:
+  image:
+    defaultStyle: illustration
+    defaultProvider: replicate
+    budget:
+      maxUsd: 1.50
+      maxCount: 10
+  audio:
+    defaultProvider: elevenlabs
+    budget:
+      maxUsd: 0.50
+      maxCount: 5
