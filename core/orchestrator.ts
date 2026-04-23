@@ -1,6 +1,6 @@
 import { exec } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, writeFile } from 'node:fs/promises';
+import { access, cp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -74,6 +74,20 @@ export interface OrchestratorOptions extends OrchestratorInput {
   strategy?: AgentStrategy;
   /** Skip workspace.cleanup() at the end so the user can inspect the output. */
   keepWorkspace?: boolean;
+  // ---- Phase 7.8: caller-managed workspace ----------------------------------
+  /**
+   * If supplied, the orchestrator uses this workspace instead of creating a
+   * new one. Lets CLI commands create the workspace early (before spec /
+   * roadmap phases) so SIGINT can register an active project before any LLM
+   * work starts. The orchestrator will NOT call workspace.cleanup() unless
+   * `keepWorkspace === false`; callers are expected to manage cleanup.
+   */
+  existingWorkspace?: WorkspaceHandle;
+  /**
+   * If supplied, also skip workspace creation AND scaffold (template copy /
+   * generator). Useful when resuming — the workspace already has the scaffold.
+   */
+  skipScaffold?: boolean;
   // ---- Phase 11.a: creative-agent wiring ----------------------------------
   /** If set, artist/sound's `generate_image`/`generate_audio` tools wrap it. */
   assetGenerator?: AssetGenerator;
@@ -139,18 +153,18 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   // 2. Load recipe
   const recipe = await (deps.loadRecipe ?? defaultLoadRecipe)(spec.type, repoRoot);
 
-  // 3. Create workspace
+  // 3. Create workspace (or reuse a caller-supplied one — Phase 7.8).
   // F20 FIX: projectId is `<timestamp>-<sha256 prefix>` (no request-derived slug).
   // Raw request lives in REPORT.md. Keeping the dir name short prevents pnpm
   // symlink hoist from silently failing on Windows (MAX_PATH) for long
   // multi-byte Japanese requests. spec.slug is still computed for display.
-  const projectId = `${yyyymmddHHmm()}-${requestHash(opts.request)}`;
-  const workspace = await (deps.createWorkspace ?? defaultCreateWorkspace)(
-    projectId,
-    repoRoot,
-    logger,
-  );
-  logger.info('workspace created', { dir: workspace.dir });
+  const projectId = opts.existingWorkspace
+    ? opts.existingWorkspace.projectId
+    : makeProjectId(opts.request);
+  const workspace = opts.existingWorkspace
+    ? opts.existingWorkspace
+    : await (deps.createWorkspace ?? defaultCreateWorkspace)(projectId, repoRoot, logger);
+  logger.info('workspace ready', { dir: workspace.dir, reused: !!opts.existingWorkspace });
 
   const metrics = new MetricsRecorder({ projectId, dir: workspace.dir, logger });
 
@@ -180,24 +194,43 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
 
     const artifacts: Artifacts = {};
 
-    // 4. Director → spec.md
-    await invokeInto(agents.director, artifactInput(spec, workspace, recipe, artifacts), artifacts);
-    if (artifacts.spec) {
-      await writeFile(join(workspace.dir, 'spec.md'), artifacts.spec, 'utf8');
+    // 4. Director → spec.md (Phase 7.8: skip if interviewer already wrote it).
+    if (await fileExists(join(workspace.dir, 'spec.md'))) {
+      artifacts.spec = await readFile(join(workspace.dir, 'spec.md'), 'utf8');
+      logger.info('director: skipped (spec.md already present)');
+    } else {
+      await invokeInto(
+        agents.director,
+        artifactInput(spec, workspace, recipe, artifacts),
+        artifacts,
+      );
+      if (artifacts.spec) {
+        await writeFile(join(workspace.dir, 'spec.md'), artifacts.spec, 'utf8');
+      }
     }
 
-    // 5. Architect → design.md
-    await invokeInto(
-      agents.architect,
-      artifactInput(spec, workspace, recipe, artifacts),
-      artifacts,
-    );
-    if (artifacts.design) {
-      await writeFile(join(workspace.dir, 'design.md'), artifacts.design, 'utf8');
+    // 5. Architect → design.md (skip if it already exists, e.g. on resume).
+    if (await fileExists(join(workspace.dir, 'design.md'))) {
+      artifacts.design = await readFile(join(workspace.dir, 'design.md'), 'utf8');
+      logger.info('architect: skipped (design.md already present)');
+    } else {
+      await invokeInto(
+        agents.architect,
+        artifactInput(spec, workspace, recipe, artifacts),
+        artifacts,
+      );
+      if (artifacts.design) {
+        await writeFile(join(workspace.dir, 'design.md'), artifacts.design, 'utf8');
+      }
     }
 
-    // 6. Scaffold
-    await (deps.scaffold ?? defaultScaffold)(recipe, workspace, logger, repoRoot);
+    // 6. Scaffold (Phase 7.8: skip when caller already populated workspace,
+    // e.g. on resume after a crash mid-build).
+    if (!opts.skipScaffold) {
+      await (deps.scaffold ?? defaultScaffold)(recipe, workspace, logger, repoRoot);
+    } else {
+      logger.info('scaffold: skipped (skipScaffold=true)');
+    }
 
     // 6.5 (Phase 11.a) Creative phase — writer / artist / sound run in
     // parallel. They all read spec.md + design.md (via tools) and write
@@ -343,7 +376,12 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     });
     return report;
   } finally {
-    if (!opts.keepWorkspace) {
+    // Cleanup policy:
+    //   - existingWorkspace: caller manages cleanup, never call here.
+    //   - keepWorkspace=true: explicit opt-out (default for `uaf create` so
+    //     the user can inspect output).
+    //   - otherwise: remove the workspace (used by some integration tests).
+    if (!opts.existingWorkspace && !opts.keepWorkspace) {
       await workspace
         .cleanup()
         .catch((err) => logger.warn('workspace cleanup failed', { error: String(err) }));
@@ -621,6 +659,23 @@ function yyyymmddHHmm(d = new Date()): string {
  */
 export function requestHash(request: string): string {
   return createHash('sha256').update(request).digest('hex').slice(0, 6);
+}
+
+/**
+ * Phase 7.8: project-id derivation factored out so CLI commands can create
+ * the workspace before runOrchestrator runs. `<timestamp>-<sha256-prefix>`.
+ */
+export function makeProjectId(request: string, d = new Date()): string {
+  return `${yyyymmddHHmm(d)}-${requestHash(request)}`;
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function truncate(s: string, n: number): string {

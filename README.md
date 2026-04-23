@@ -2,7 +2,7 @@
 
 > 自然言語リクエストから、**ゲーム・Web アプリ・モバイルアプリ・デスクトップアプリ・CLI・API を完全自動で生成**するマルチエージェントシステム。
 
-**Phase 7 (CLI & DX) 完走版**。`uaf` コマンド 1 つで 10 種類の操作を提供する個人用プロトタイピング道具。
+**Phase 7.8 (Spec-Roadmap-Resume-Preview) 完走版**。`uaf` コマンド 1 つで **13 種類の操作**を提供する個人用プロトタイピング道具。
 
 ---
 
@@ -20,18 +20,41 @@ pnpm link --global
 uaf --help                   # 動作確認
 uaf doctor                   # 環境 10 項目チェック
 
-# 3. 最初のプロジェクト
+# 3. 最初のプロジェクト (Phase 7.8: spec → roadmap → build の新フロー)
 uaf create "2Dの避けゲーム" --budget-usd 1.50 --asset-budget-usd 1.00
-# → workspace/<projectId>/ に絵と音付きのコードが生成される
-# → REPORT.md / state.json / assets-manifest.json / audio-manifest.json / copy.json / critique.md
+# → interviewer が 3〜7 個の質問を投げる
+# → spec.md が提示される → y/N/e で承認
+# → roadmap-builder が 8〜15 タスクのロードマップを生成
+# → 実装開始 → workspace/<projectId>/ に絵と音付きのコードが生成される
+# → REPORT.md / spec.md / roadmap.md / state.json / assets-manifest.json / audio-manifest.json / copy.json / critique.md
 
-# 4. 差分を加えたくなったら
+# 4. 途中で中断したら (Ctrl+C または PC 再起動)
+uaf list --incomplete        # 中断プロジェクトを一覧
+uaf status <projectId>       # phase / 進捗 / per-task badges を確認
+uaf resume <projectId>       # 中断地点から再開 (完了済み task はスキップ)
+
+# 5. 完成したら即プレビュー (レシピ別ハンドラ)
+uaf preview <projectId>      # vite dev / next dev / expo / electron 自動起動 + ブラウザオープン
+# Ctrl+C で停止、または: uaf preview --stop <projectId>
+# バックグラウンド起動: uaf preview <projectId> --detach
+
+# 6. 差分を加えたくなったら
 uaf iterate <projectId> "BGM を追加" --dry-run     # まずドライラン
 uaf iterate <projectId> "BGM を追加" --budget-usd 0.50
 
-# 5. 何がどれだけかかったか
+# 7. 何がどれだけかかったか
 uaf cost
-uaf list
+uaf list                     # PHASE + PROGRESS 列も表示
+```
+
+### Phase 7.8 以前の直接フロー（spec 対話なし）
+
+```bash
+# --no-spec で Director 直呼びの legacy フローに戻せる
+uaf create "CSV 整形 CLI" --recipe cli --no-spec --budget-usd 0.50
+
+# CI / スクリプトでは事前 spec.md を渡す
+uaf create --spec-file ./my-spec.md --recipe 2d-game --yes
 ```
 
 ### グローバルインストール手順（詳細）
@@ -64,20 +87,23 @@ pnpm unlink --global universal-agent-factory
 | R4 | **サーキットブレーカー** | 同一エラー 3 連続 or 最大イテレーション到達で停止 |
 | R5 | **コスト可観測性** | 全 LLM 呼び出しを `workspace/<proj>/metrics.jsonl` に記録 |
 
-## 10 コマンド
+## 13 コマンド
 
 | コマンド | 用途 | 対話モード |
 |---|---|---|
-| `uaf create <request>` | プロジェクト生成 | ✓ |
+| `uaf create <request>` | プロジェクト生成 (Phase 7.8: spec → roadmap → build フロー) | ✓ |
 | `uaf add-recipe --type X --description Y` | レシピ追加 | ✓ |
 | `uaf iterate <proj-id> <request>` | 差分追加 | — |
-| `uaf list` | プロジェクト一覧 | — |
+| `uaf list [--incomplete]` | プロジェクト一覧（Phase 7.8: `--incomplete` で中断中のみ） | — |
 | `uaf open <proj-id>` | エディタで開く | — |
 | `uaf recipes` | レシピ一覧 | — |
 | `uaf cost [--period all\|today\|week\|month]` | コスト集計 | — |
-| `uaf clean [--older-than 30d] [--dry-run]` | 古い workspace 削除 | — |
+| `uaf clean [--older-than 30d] [--incomplete]` | 古い workspace 削除 | — |
 | `uaf config get/set/list/edit` | 設定操作 | — |
 | `uaf doctor` | 環境チェック | — |
+| `uaf status <proj-id>` | **(Phase 7.8)** phase / 進捗 / per-task の可視化 | — |
+| `uaf resume <proj-id>` | **(Phase 7.8)** 中断プロジェクトの再開 | — |
+| `uaf preview <proj-id>` | **(Phase 7.8)** レシピ別に dev server 起動 | — |
 
 - 引数なしで `uaf` を実行するとトップレベルの対話ウィザード
 - 共通フラグ: `--verbose`（前後どちらでも有効）、`--help`
@@ -89,28 +115,34 @@ pnpm unlink --global universal-agent-factory
 
 ```
 bin/uaf.js              ← shebang launcher (tsx/esm/api で TS を直接ロード)
-  └─ cli/index.ts       ← commander ルーター + dotenv + 共通エラーハンドラ
-       ├─ cli/commands/ ← 10 コマンドの実装
+  └─ cli/index.ts       ← commander ルーター + dotenv + SIGINT ハンドラ install
+       ├─ cli/commands/ ← 13 コマンドの実装 (create / iterate / status / resume / preview ほか)
        ├─ cli/config/   ← YAML 2 層マージ (project > global > defaults)
-       ├─ cli/interactive/ ← 対話ウィザード (@inquirer/prompts)
+       ├─ cli/interactive/ ← 対話ウィザード + spec-wizard (@inquirer/prompts)
        ├─ cli/ui/       ← logger / errors / colors / exit-codes
-       └─ cli/utils/    ← state.json / snapshot / duration / editor
+       └─ cli/utils/    ← workspace / snapshot / duration / editor / ports
 
-core/                   ← オーケストレーション基盤 (Phase 1-6、CLI 非依存)
-  ├─ orchestrator.ts    ← メインループ
+core/                   ← オーケストレーション基盤 (CLI 非依存)
+  ├─ orchestrator.ts    ← メインループ (Phase 7.8: existingWorkspace / skipScaffold)
   ├─ classifier.ts      ← ヒューリスティック分類
   ├─ recipe-loader.ts   ← YAML + zod 検証
   ├─ agent-factory.ts   ← エージェント合成
   ├─ workspace-manager.ts ← プロジェクト隔離 (plain-directory, F6)
   ├─ strategies/claude.ts ← Claude Agent SDK wrapper (F14/F17/F18)
-  ├─ tools/index.ts     ← read_file / write_file / edit_file / list_dir / bash
-  └─ pricing.ts         ← F14 現行モデルレート
+  ├─ tools/             ← read_file / write_file / edit_file / list_dir / bash / ask_user / generate_image / generate_audio
+  ├─ pricing.ts         ← F14 現行モデルレート
+  ├─ state.ts           ← (Phase 7.8) state.json zod スキーマ + atomic I/O
+  ├─ checkpoint.ts      ← (Phase 7.8) writeTaskCheckpoint / writeInterruptCheckpoint
+  ├─ signal-handler.ts  ← (Phase 7.8) SIGINT idempotent install + 二段階強制終了
+  ├─ resume.ts          ← (Phase 7.8) planResume 純粋関数 (5 ブランチ)
+  ├─ roadmap-builder.ts ← (Phase 7.8) JSON 抽出 + zod + topological sort
+  └─ utils/atomic-write.ts ← (Phase 7.8) tmp→fsync→rename + Windows EPERM/EBUSY リトライ
 
-agents/                 ← 汎用 6 エージェント + common preamble
-recipes/                ← プロジェクト種別テンプレート (Phase 3-6)
+agents/                 ← 汎用 12 エージェント (6 base + 4 creative + interviewer + roadmap-builder)
+recipes/                ← プロジェクト種別テンプレート (7 種類)
 meta/                   ← recipe-builder メタエージェント (Phase 5, F19)
-scripts/                ← レガシーラッパー + 運用ユーティリティ
-tests/                  ← 280+ 件の vitest (unit + 回帰 + CLI)
+scripts/                ← レガシーラッパー + 運用ユーティリティ + e2e-phase7-8.ts
+tests/                  ← 462 件の vitest (unit + 回帰 + CLI + E2E)
 workspace/              ← .gitignore 配下、生成物の隔離先
 ```
 
@@ -136,6 +168,8 @@ editor: code
 |---|---|
 | director / architect / programmer | Sonnet 4.6 |
 | tester / reviewer / evaluator | Haiku 4.5 |
+| artist / sound / writer / critic | Sonnet 4.6 (Phase 11.a) |
+| interviewer / roadmap-builder | Sonnet 4.6 (Phase 7.8、対話品質 + 構造化出力の信頼性のため) |
 | classifier | ヒューリスティック（LLM 非使用） |
 
 **Opus 4.7 は opt-in のみ**。デフォルトルートには含めず、明示選択時は `resolveModel` が `opt-in warn` を発火（F18）。
@@ -149,10 +183,11 @@ editor: code
 ## テストと検証
 
 ```bash
-pnpm test                              # 全テスト (280+ 件)
+pnpm test                              # 全テスト (462 件)
 pnpm tsx scripts/check-recipes.ts      # F19 構造検証
-pnpm typecheck                         # tsc --noEmit
-uaf doctor                             # 環境 8 項目チェック
+pnpm exec tsc --noEmit                 # 型チェック
+uaf doctor                             # 環境 10 項目チェック
+pnpm tsx scripts/e2e-phase7-8.ts       # Phase 7.8 実 LLM E2E (~$2)
 ```
 
 ## 実装フェーズ

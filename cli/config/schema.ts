@@ -28,6 +28,9 @@ export const AGENT_ROLES = [
   'sound',
   'writer',
   'critic',
+  // Phase 7.8 — pre-orchestrator dialogue + planning agents.
+  'interviewer',
+  'roadmap-builder',
 ] as const;
 export type ConfigAgentRole = (typeof AGENT_ROLES)[number];
 
@@ -44,6 +47,8 @@ export const ModelsSchema = z
     sound: z.string().min(1).optional(),
     writer: z.string().min(1).optional(),
     critic: z.string().min(1).optional(),
+    interviewer: z.string().min(1).optional(),
+    'roadmap-builder': z.string().min(1).optional(),
   })
   .strict();
 
@@ -136,6 +141,8 @@ export const KNOWN_CONFIG_KEYS = [
   'models.sound',
   'models.writer',
   'models.critic',
+  'models.interviewer',
+  'models.roadmap-builder',
   'classifier.default_type',
   // Phase 11.a: asset provider settings.
   'assets.budget_usd',

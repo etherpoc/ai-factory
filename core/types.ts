@@ -21,7 +21,14 @@ export type AgentRole =
   | 'artist'
   | 'sound'
   | 'writer'
-  | 'critic';
+  | 'critic'
+  // Phase 7.8: pre-orchestrator dialogue agent that builds spec.md from
+  // a Q&A session with the user. Lives outside the main loop — invoked
+  // by `cli/interactive/spec-wizard.ts` before runOrchestrator() is called.
+  | 'interviewer'
+  // Phase 7.8: produces roadmap.md (and the structured task array stored in
+  // state.json.roadmap) from spec.md. Single-shot, no tools beyond write_file.
+  | 'roadmap-builder';
 
 /**
  * Tool exposed to an agent. Kept intentionally minimal so we can back it with

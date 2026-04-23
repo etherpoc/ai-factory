@@ -32,6 +32,12 @@ flowchart LR
 | `circuit-breaker.ts`   | 同一エラー 3 連続 or 最大イテレーション到達時に停止 (R4)。`UAF_MAX_ITERATIONS` / `UAF_CIRCUIT_BREAKER_STRIKES` で調整                                                                       |
 | `metrics.ts`           | `MetricsRecorder.wrap()` が LLM 呼び出しの token / latency / model を `workspace/<proj-id>/metrics.jsonl` に追記 (R5)                                                                       |
 | `logger.ts`            | pino ベースの構造化ロガー（`nullLogger` をテスト用に公開）                                                                                                                                  |
+| `state.ts`             | (Phase 7.8) `state.json` の zod スキーマと atomic な read/write/upsert。`phase` / `spec` / `roadmap` / `resumable` / `lastCheckpointAt` を後方互換 optional で追加                          |
+| `checkpoint.ts`        | (Phase 7.8) `writeTaskCheckpoint()` が roadmap 各タスク完了時に state.json を atomic 更新。`writeInterruptCheckpoint()` で SIGINT を捕捉。`isResumableState()` で resume 可否判定           |
+| `signal-handler.ts`    | (Phase 7.8) SIGINT ハンドラ。1 度目で active project の checkpoint を書いて終了、5 秒以内の 2 度目で強制終了（R12）                                                                          |
+| `utils/atomic-write.ts`| (Phase 7.8) `tmp → fsync → rename` 経由の atomic 書き込み。Windows EPERM/EBUSY をリトライ                                                                                                  |
+| `roadmap-builder.ts`   | (Phase 7.8) `roadmap-builder` エージェントを呼び出し、JSON 抽出 + zod 検証 + topological sort + DAG 検証を行い `RoadmapMeta` を返す                                                          |
+| `resume.ts`            | (Phase 7.8) `planResume()` 純粋関数で state + filesystem survey から resume action を決定。`surveyWorkspaceFiles()` がディスク調査                                                          |
 
 ## 使い方（他層から見た最小 API）
 
@@ -60,6 +66,23 @@ console.log(report.summary);
 - 2026-04-21 (Phase 2): `classifier.ts` (ヒューリスティック分類 + `typeHint` バイパス)、`strategies/claude.ts` (`@anthropic-ai/sdk` 統合、prompt caching、JSON 抽出) を追加。orchestrator のデフォルトを `classify()` + `createAllAgents()` に差し替え。`AgentStrategy.run` に `WrapContext` を通して token usage を記録 (R5)。テスト累計 46 ケース。
 - 2026-04-21 (F6 / Phase 7 先倒し): `AgentStrategy.run` に `role: AgentRole` を明示的に追加 (claude strategy の役割推論バグ解消)。`createWorkspace()` の既定を **plain directory** に変更し、git worktree 版は `createGitWorktreeWorkspace()` に分離 (opt-in)。理由: 親レポ内に worktree を掘ると scaffold が親レポの内容と混ざる (FINDINGS.md F6 参照)。
 - 2026-04-22 (F18 / F17 / F14 系): `core/pricing.ts` を新設し正しい Opus 4.7 / Sonnet 4.6 / Haiku 4.5 料金を単一情報源化。`scripts/run.ts` の `budgetedStrategy` が `extras`（preamble）を転送していなかった F17 を修正（回帰テスト `strategy-extras-forward.test.ts`）。Opus 明示 opt-in を強制するため `resolveModel` に warn を追加、回帰テスト `opus-opt-in.test.ts` を追加。`DEFAULT_MODELS_BY_ROLE` は Sonnet + Haiku のみ。
+- 2026-04-23 (Phase 7.8.1 — 基盤準備):
+  - **state.json スキーマを `core/state.ts` に切り出し** (旧 `cli/utils/workspace.ts`)。`phase` / `spec` / `roadmap` / `resumable` / `lastCheckpointAt` を **後方互換 optional** で追加。`cli/utils/workspace.ts` は re-export + CLI 固有の `findProject` / `listProjects` / snapshot だけ保持。`isLegacyState()` で Phase 7.5/11.a までの workspace を識別。
+  - **`core/utils/atomic-write.ts`**: `tmp → fsync → rename` の atomic 書き込み。Windows での `EPERM` / `EBUSY` / `EACCES` を指数バックオフで最大 8 回リトライ（NTFS の同時書き込み対策）。
+  - **`core/checkpoint.ts`**: `writeTaskCheckpoint()` で roadmap タスク完了時に state.json を atomic 更新（status / completedAt / costUsd / files の per-task メタ）、`writeInterruptCheckpoint()` で SIGINT を捕捉して `phase='interrupted'` `resumable=true` に。`isResumableState()` で resume 可否判定。
+  - **`core/signal-handler.ts`**: SIGINT を 1 度目で active project の checkpoint を書いてから終了 (exit 130)、5 秒以内の 2 度目で強制終了。`installSigintHandler()` は idempotent。`cli/index.ts` の `main()` 冒頭で 1 回だけ install。
+  - 新規テスト 28 件（atomic-write × 6, state × 5, checkpoint × 12, signal-handler × 5）。累計 404 件 green。
+- 2026-04-23 (Phase 7.8.3 — ロードマップ生成):
+  - **`core/roadmap-builder.ts`**: `roadmap-builder` エージェント呼び出しの薄いラッパー。応答テキストから JSON 抽出（fenced / プロパティ抽出 fallback）、zod スキーマ検証 (8〜15 タスク目安)、Kahn algorithm による topological sort、DAG 循環 / 重複 ID / 自己依存 / 未知参照を全て検出。
+  - `roadmap-builder` 役割を `AgentRole` に追加（interviewer と同じパターン）。Sonnet 4.6 / 出力は roadmap.md (write_file) + JSON テキスト応答。
+  - 新規テスト 16 件。
+- 2026-04-23 (Phase 7.8.4 — 実行フロー改修):
+  - **`orchestrator.ts`**: `existingWorkspace?: WorkspaceHandle` と `skipScaffold?: boolean` を追加。spec.md / design.md が既に存在する場合は director / architect をスキップ（resume 時の重複防止）。`makeProjectId()` を export して CLI が事前生成可能に。
+  - 新フロー (`uaf create` デフォルト): classify → workspace 作成 → spec phase (interviewer) → roadmap phase (roadmap-builder) → 承認 → build phase (orchestrator)。各フェーズで state.json checkpoint。
+  - レガシーフロー (`--no-spec`): 従来通り orchestrator 直接呼び出し、state.json は phase なし。
+- 2026-04-23 (Phase 7.8.5 — 再開機能):
+  - **`core/resume.ts`**: 純粋関数 `planResume()` が state + filesystem survey から resume action 決定（rerun-spec / rerun-roadmap / continue-build / already-complete / not-resumable）。
+  - 累計テスト 453 件 green、tsc クリーン。Opus 0 calls 維持。
 - 2026-04-21 (F7 / F4 / F5 / Phase 7 先倒し):
   - **F7**: `EvaluationSpec.entrypoints` を導入、orchestrator に `entrypoints-implemented` 決定論判定と `mergeCompletion()` (LLM の claim より deterministic を優先) を追加。
   - **F4**: `agents/_common-preamble.md` を新設 (UAF の R1〜R5 やツール規約を含む ~3k char)。agent-factory が読み込み、claude strategy が `system: [{preamble, cache_control: ephemeral}, {role-prompt}]` で送る。同一 preamble の複数 role 呼び出しでキャッシュヒット。

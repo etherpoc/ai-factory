@@ -44,6 +44,10 @@ export const DEFAULT_MODELS_BY_ROLE: Record<AgentRole, string> = {
   sound: 'claude-sonnet-4-6',
   writer: 'claude-sonnet-4-6',
   critic: 'claude-sonnet-4-6',
+  // Phase 7.8: dialogue quality matters here — user-facing — so Sonnet, not Haiku.
+  interviewer: 'claude-sonnet-4-6',
+  // Phase 7.8: structured task decomposition needs reliable JSON output.
+  'roadmap-builder': 'claude-sonnet-4-6',
 };
 
 export interface ClaudeStrategyOptions {
@@ -391,6 +395,16 @@ function parseResponse(
       // via tools (assets/*, copy.json, critique.md). The text response is
       // a plain summary — record it as notes for the orchestrator to surface.
       return { artifacts: {}, notes: truncate(text, 800) };
+    case 'interviewer':
+      // Phase 7.8 dialogue agent: real output is spec.md written via
+      // write_file inside the tool-use loop. Text is a wrap-up summary.
+      return { artifacts: {}, notes: truncate(text, 800) };
+    case 'roadmap-builder':
+      // Phase 7.8 roadmap-builder: real output is roadmap.md written via
+      // write_file. Text response is a JSON envelope parsed by
+      // core/roadmap-builder.ts; we pass it through as notes verbatim
+      // (no truncation here so the wrapper can extract the full JSON).
+      return { artifacts: {}, notes: text };
   }
 }
 

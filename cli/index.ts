@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { createCliLogger } from './ui/logger.js';
 import { printError } from './ui/errors.js';
 import { EXIT_CODES, exitCodeFor } from './ui/exit-codes.js';
+import { installSigintHandler } from '../core/signal-handler.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, '..');
@@ -40,6 +41,12 @@ async function readVersion(): Promise<string> {
  */
 interface GlobalOpts {
   verbose?: boolean;
+  /**
+   * Phase 7.8.10: also write structured logs to stderr (JSON lines). Without
+   * this flag, long-running commands route logs to a file under the project
+   * workspace. Read with `uaf logs <proj-id>`.
+   */
+  logStream?: boolean;
 }
 
 function readGlobalOpts(cmd: Command): GlobalOpts {
@@ -60,6 +67,12 @@ async function buildProgram(): Promise<Command> {
     )
     .version(version, '-V, --version', 'show the uaf version')
     .addOption(new Option('--verbose', 'show detailed logs and full stack traces').default(false))
+    .addOption(
+      new Option(
+        '--log-stream',
+        'also stream structured logs to stderr (JSON). Without this, logs go to workspace/<proj-id>/logs/<cmd>.log; view with `uaf logs <proj-id>`.',
+      ).default(false),
+    )
     // When the user runs bare `uaf`, fall into the interactive wizard instead
     // of printing help. `uaf --help` still works because commander parses the
     // help flag before running the action.
@@ -86,6 +99,10 @@ async function buildProgram(): Promise<Command> {
     )
     .option('--no-assets', 'skip artist + sound agents (keeps writer + critic if declared)')
     .option('--skip-critic', 'skip the critic agent')
+    // Phase 7.8 spec/roadmap flow knobs.
+    .option('--no-spec', 'bypass the spec/roadmap dialogue (run the legacy direct flow)')
+    .option('--spec-file <path>', 'use this spec.md instead of running the dialogue')
+    .option('-y, --yes', 'auto-approve the generated spec/roadmap (skip the y/N prompt)')
     .action(async (request: string[], opts, cmd: Command) => {
       const joined = request.join(' ').trim();
       if (!joined) {
@@ -140,16 +157,77 @@ async function buildProgram(): Promise<Command> {
       );
     });
 
+  // ---- preview (Phase 7.8.6) ---------------------------------------------
+  program
+    .command('preview')
+    .description('Run / preview a generated project (per-recipe handler).')
+    .argument('[proj-id]', 'project id (omit only with --stop-all)')
+    .option('--detach', 'run in the background; pid/port stored in state.json.preview')
+    .option('--stop', 'stop the running preview for this project')
+    .option('--stop-all', 'stop every detached preview across all projects')
+    .option('--run <args>', 'cli recipes only — execute the binary with these args (quoted)')
+    .option('--no-open', 'skip the auto browser open')
+    .option('--port <n>', 'override the preferred port')
+    .action(async (projId: string | undefined, opts, cmd: Command) => {
+      const { runPreview } = await import('./commands/preview.js');
+      await runPreview({ ...(projId !== undefined ? { projectId: projId } : {}), ...opts }, readGlobalOpts(cmd));
+    });
+
+  // ---- status (Phase 7.8) ------------------------------------------------
+  program
+    .command('status')
+    .description('Show progress / phase / per-task state for a project.')
+    .argument('<proj-id>', 'project id')
+    .option('--json', 'emit JSON')
+    .action(async (projId: string, opts, cmd: Command) => {
+      const { runStatus } = await import('./commands/status.js');
+      await runStatus({ projectId: projId }, opts, readGlobalOpts(cmd));
+    });
+
   // ---- list --------------------------------------------------------------
   program
     .command('list')
     .description('List generated projects.')
     .option('--recipe <type>', 'filter by recipe type')
     .option('--status <status>', 'filter by status (done|halted|failed)')
+    .option('--incomplete', 'only show projects `uaf resume` can pick up')
+    .option('--all', 'with --incomplete, include legacy workspaces too')
     .option('--json', 'emit JSON instead of a human table')
     .action(async (opts, cmd: Command) => {
       const { runList } = await import('./commands/list.js');
       await runList(opts, readGlobalOpts(cmd));
+    });
+
+  // ---- resume (Phase 7.8) ------------------------------------------------
+  program
+    .command('resume')
+    .description('Resume a project that was interrupted, halted, or failed.')
+    .argument('<proj-id>', 'project id to resume')
+    .option('-y, --yes', 'skip the "continue?" prompt')
+    .option('--budget-usd <usd>', 'budget cap for this resume')
+    .option('--max-iterations <n>', 'orchestrator loop cap')
+    .option('--model <id>', 'force a specific model for all roles')
+    .option('--asset-budget-usd <usd>', 'cap external asset spend')
+    .option('--no-assets', 'skip artist + sound')
+    .option('--skip-critic', 'skip the critic agent')
+    .action(async (projId: string, opts, cmd: Command) => {
+      const { runResume } = await import('./commands/resume.js');
+      await runResume({ projectId: projId, ...opts }, readGlobalOpts(cmd));
+    });
+
+  // ---- logs (Phase 7.8.10) -----------------------------------------------
+  program
+    .command('logs')
+    .description('View the log file for a project (default: head via pager-friendly dump).')
+    .argument('<proj-id>', 'project id')
+    .option('--tail [n]', 'show the last N lines (default 50)')
+    .option('--follow', 'follow new log lines as they are written (like tail -f)')
+    .option('--filter <pattern>', 'keep only lines matching this regex (case-insensitive)')
+    .option('--raw', 'emit raw JSON lines instead of the prettified view')
+    .option('--cmd <name>', 'log file name without the .log suffix (default: all)')
+    .action(async (projId: string, opts, cmd: Command) => {
+      const { runLogs } = await import('./commands/logs.js');
+      await runLogs({ projectId: projId, ...opts }, readGlobalOpts(cmd));
     });
 
   // ---- open --------------------------------------------------------------
@@ -190,6 +268,7 @@ async function buildProgram(): Promise<Command> {
     .command('clean')
     .description('Remove old workspaces.')
     .option('--older-than <duration>', 'e.g. 7d, 2w, 1m', '30d')
+    .option('--incomplete', 'also delete resumable (incomplete) projects')
     .option('--dry-run', 'show what would be deleted')
     .option('-y, --yes', 'skip confirmation prompt')
     .action(async (opts, cmd: Command) => {
@@ -257,6 +336,11 @@ async function buildProgram(): Promise<Command> {
  * flip verbose mode on.
  */
 export async function main(argv: string[]): Promise<number> {
+  // Phase 7.8 (R12): install once at startup. The handler is a no-op until
+  // a long-running command (create / iterate / resume) registers an active
+  // project via setActiveProject().
+  installSigintHandler();
+
   const program = await buildProgram();
   const logger = createCliLogger({ verbose: argv.includes('--verbose') });
 

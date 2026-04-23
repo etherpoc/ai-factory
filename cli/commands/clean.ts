@@ -6,6 +6,7 @@
  * included using each snapshot's mtime.
  */
 import { rm } from 'node:fs/promises';
+import { isResumableState } from '../../core/checkpoint.js';
 import { loadEffectiveConfig, resolveWorkspaceDir } from '../config/loader.js';
 import { colors, symbols } from '../ui/colors.js';
 import { UafError } from '../ui/errors.js';
@@ -17,6 +18,12 @@ export interface CleanOptions {
   olderThan?: string;
   dryRun?: boolean;
   yes?: boolean;
+  /**
+   * Phase 7.8: also nuke incomplete (resumable) projects regardless of age.
+   * Default: skip them so a long-running build that's currently mid-flight
+   * doesn't get yanked out from under the user.
+   */
+  incomplete?: boolean;
 }
 
 export interface CleanDeps {
@@ -36,11 +43,32 @@ export async function runClean(
   const projects = await listProjects(base);
   const snapshots = await listSnapshots(base);
 
-  const targets: Array<{ kind: 'project' | 'snapshot'; name: string; dir: string; ageMs: number }> = [];
+  const targets: Array<{
+    kind: 'project' | 'snapshot';
+    name: string;
+    dir: string;
+    ageMs: number;
+    /** Why this project was selected — affects display only. */
+    reason?: 'aged' | 'incomplete';
+  }> = [];
   for (const p of projects) {
     const ts = p.state ? Date.parse(p.state.lastRunAt) : p.mtimeMs;
-    if (ts < cutoff) {
-      targets.push({ kind: 'project', name: p.projectId, dir: p.dir, ageMs: Date.now() - ts });
+    const ageMs = Date.now() - ts;
+    const aged = ts < cutoff;
+    const resumable = isResumableState(p.state);
+    if (resumable && !opts.incomplete && !aged) continue;
+    if (resumable && !opts.incomplete && aged) {
+      // Aged AND resumable — protect by default. User must explicitly opt in.
+      continue;
+    }
+    if (aged || (opts.incomplete && resumable)) {
+      targets.push({
+        kind: 'project',
+        name: p.projectId,
+        dir: p.dir,
+        ageMs,
+        reason: aged ? 'aged' : 'incomplete',
+      });
     }
   }
   for (const s of snapshots) {
@@ -56,12 +84,21 @@ export async function runClean(
 
   process.stdout.write(colors.bold(`=== uaf clean ===\n`));
   process.stdout.write(`cutoff  : older than ${formatDuration(cutoffAge)}\n`);
-  process.stdout.write(`targets : ${targets.length} (${targets.filter((t) => t.kind === 'project').length} projects, ${targets.filter((t) => t.kind === 'snapshot').length} snapshots)\n`);
+  if (opts.incomplete) {
+    process.stdout.write(colors.dim('mode    : --incomplete (also targets resumable projects)\n'));
+  }
+  process.stdout.write(
+    `targets : ${targets.length} (${targets.filter((t) => t.kind === 'project').length} projects, ${targets.filter((t) => t.kind === 'snapshot').length} snapshots)\n`,
+  );
   for (const t of targets) {
+    const tag =
+      t.kind === 'snapshot'
+        ? colors.dim('snap')
+        : t.reason === 'incomplete'
+          ? colors.yellow('proj!')
+          : colors.cyan('proj');
     process.stdout.write(
-      `  ${t.kind === 'snapshot' ? colors.dim('snap') : colors.cyan('proj')}  ${t.name}${
-        ' '.repeat(Math.max(1, 48 - t.name.length))
-      }${formatDuration(t.ageMs)} old\n`,
+      `  ${tag}  ${t.name}${' '.repeat(Math.max(1, 48 - t.name.length))}${formatDuration(t.ageMs)} old\n`,
     );
   }
 

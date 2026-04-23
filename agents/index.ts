@@ -28,6 +28,13 @@ const ROLES: readonly AgentRole[] = [
   'sound',
   'writer',
   'critic',
+  // Phase 7.8: interviewer is constructed for AgentMap completeness, but the
+  // orchestrator never calls it — `cli/interactive/spec-wizard.ts` invokes
+  // it directly before runOrchestrator() starts.
+  'interviewer',
+  // Phase 7.8: roadmap-builder is also off-orchestrator — invoked by
+  // `core/roadmap-builder.ts` between spec-wizard and runOrchestrator.
+  'roadmap-builder',
 ];
 
 /**
@@ -51,3 +58,5 @@ export { createArtistAgent } from './artist/index.js';
 export { createSoundAgent } from './sound/index.js';
 export { createWriterAgent } from './writer/index.js';
 export { createCriticAgent } from './critic/index.js';
+export { createInterviewerAgent } from './interviewer/index.js';
+export { createRoadmapBuilderAgent } from './roadmap-builder/index.js';

@@ -283,6 +283,11 @@ export const DEFAULT_TOOLS_BY_ROLE: Record<AgentRole, readonly string[]> = {
   sound: ['read_file', 'list_dir', 'write_file', 'generate_audio'],
   writer: ['read_file', 'list_dir', 'write_file'],
   critic: ['read_file', 'list_dir', 'write_file', 'bash'],
+  // Phase 7.8: spec dialogue agent. `ask_user` is registered at runtime by
+  // spec-wizard (interactive only). `write_file` lets it persist spec.md.
+  interviewer: ['ask_user', 'write_file'],
+  // Phase 7.8: roadmap-builder. Reads spec.md, writes roadmap.md.
+  'roadmap-builder': ['read_file', 'write_file'],
 };
 
 export function defaultToolsFor(role: AgentRole, extra?: ReadonlyMap<string, Tool>): Tool[] {

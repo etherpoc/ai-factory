@@ -100,11 +100,23 @@ describe('Phase 11.a.2 — creative agents are registered', () => {
   });
 });
 
-describe('Phase 11.a.2 — createAllAgents builds the 10-role map', () => {
+describe('createAllAgents builds the full role map', () => {
   let root: string;
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'uaf-creative-'));
-    for (const role of [...CREATIVE_ROLES, 'director', 'architect', 'programmer', 'tester', 'reviewer', 'evaluator']) {
+    // Phase 7.8: interviewer is now part of the role map (constructed but
+    // unused by the orchestrator; spec-wizard invokes it directly).
+    for (const role of [
+      ...CREATIVE_ROLES,
+      'director',
+      'architect',
+      'programmer',
+      'tester',
+      'reviewer',
+      'evaluator',
+      'interviewer',
+      'roadmap-builder',
+    ]) {
       await mkdir(join(root, 'agents', role), { recursive: true });
       await writeFile(join(root, 'agents', role, 'prompt.md'), `BASE_${role}`, 'utf8');
     }
@@ -113,15 +125,19 @@ describe('Phase 11.a.2 — createAllAgents builds the 10-role map', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('returns one Agent per role (10 in total)', async () => {
+  it('returns one Agent per role (12 total: 6 base + 4 creative + interviewer + roadmap-builder)', async () => {
     const metrics = new MetricsRecorder({ projectId: 'p', dir: root, logger: nullLogger });
     const agents = await createAllAgents({ recipe: makeRecipe(), metrics, repoRoot: root });
     const keys = Object.keys(agents).sort();
-    expect(keys.length).toBe(10);
+    expect(keys.length).toBe(12);
     for (const role of CREATIVE_ROLES) {
       expect(agents[role]).toBeDefined();
       expect(agents[role].role).toBe(role);
       expect(agents[role].systemPrompt).toContain(`BASE_${role}`);
     }
+    expect(agents.interviewer).toBeDefined();
+    expect(agents.interviewer.role).toBe('interviewer');
+    expect(agents['roadmap-builder']).toBeDefined();
+    expect(agents['roadmap-builder']?.role).toBe('roadmap-builder');
   });
 });

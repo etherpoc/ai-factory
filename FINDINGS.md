@@ -815,3 +815,58 @@ e2e から得られた検証済みの事項:
 Programmer 単独で Electron の main / preload / renderer + IPC + 20 テストまで完成させた。build と test は recipe の evaluate 段階を経由せずとも **workspace 内で直接 pnpm 実行して全段階 green**。F20 が **root cause だったこと**、および desktop-app recipe 自体が **production-ready** であることが実証された。
 
 **Phase 6 closure**: orchestrator → desktop-app の Director → Architect → Programmer は全回動作。Tester / Evaluator が未到達なのは CircuitBreaker の予算制約（$0.60）によるもので、$1.20〜$1.50 の予算を与えれば full loop が完走する見込み（Phase 7 の DX 整備で確認予定）。
+
+
+# F21 候補 — uaf cost に Phase 単位の集計レンジが無い（2026-04-23 観察）
+
+**観察**: Phase 7.8 の実装中に `pnpm tsx scripts/trial-interviewer.ts` で interviewer 単体を 2 回試走した（合計 ~$0.18）。Anthropic Console では確実に課金されているが、`uaf cost --period all` の出力は $14.3250 のまま変わらなかった。
+
+**根本原因 1**: 試走スクリプトが workspace 出力先を `workspace/.trial-interviewer/<id>/` (hidden dir prefix `.`) に置いた。`cli/commands/cost.ts` の集計ループは `if (name.startsWith('.')) continue;` で hidden dir をスキップする（`.snapshots/` を除外する目的の既存コード）。試走の metrics.jsonl は集計対象外になる。
+
+**根本原因 2**: `uaf cost` の `--period` は `today | week | month | all` のみで、Phase ごと（または開発期間ごと）の累計を絞り込めない。「Phase 7.8 でいくら使ったか」を答えるには Console を開くしかない。
+
+**影響度**: 中。実装フェーズの予算管理がやりづらい。Phase 7.8 ではユーザーが「Phase 7.8 単独 $15 予算」と「累計コスト」を混同しかけた経緯あり。
+
+**対応候補**:
+
+1. **F21a**: `uaf cost --since <ISO timestamp>` オプション追加。指定日時以降の metrics.jsonl 行のみ集計。
+2. **F21b**: `uaf cost --include-hidden` オプション。`.trial-interviewer` のような実験ワークスペースを含む。
+3. **F21c**: 試走系スクリプトの workspace 命名規約を変える（hidden dir を使わない）。最も簡単だが `.snapshots` との混在で list/clean のフィルタが煩雑になる懸念。
+
+**現時点の方針**: Phase 8 以降で着手。Phase 7.8 中は手動で「baseline 値を記録 → 完了時に差分計算」で運用。
+
+**追加観察 (2026-04-23 E2E 実行後)**: `uaf cost` は `workspace/<proj-id>/metrics.jsonl` を top-level 走査するため、E2E 用にサブディレクトリ `workspace/e2e-phase7-8/A-<id>/metrics.jsonl` に置いた workspace は **さらに集計対象外**。hidden dir (`.trial-interviewer/`) の問題と本質的に同じで、「workspace 直下以外は見えない」という仕様。F21 の対応候補 1 (`--since`) と 2 (`--include-hidden`) に加えて、再帰探索オプション (`--recursive`) も候補に入る。いずれにせよ Phase 8 で検討。
+
+
+# Phase 7.8 E2E 結果レポート (2026-04-23)
+
+Phase 7.8.7 で実機 E2E を実行（`scripts/e2e-phase7-8.ts`、Sonnet 4.6 + Haiku 4.5）。**16/16 全チェック pass、Opus 0 calls、F18 ポリシー維持**。
+
+| 項目 | 値 |
+|------|-----|
+| 開始/終了 (UTC) | 2026-04-23T06:57:16Z 〜 2026-04-23T07:13:35Z |
+| 壁時計時間 | 980s (16 分 20 秒) |
+| 総コスト | $2.1271 (A $2.0561 + B $0.0710) |
+| Opus | 0 calls |
+| 予算 (Phase 7.8.7 枠 $5) | 残 $2.8729 |
+
+**Scenario B (--spec-file モード)**: spec ファイル直接指定→roadmap-builder で 11 タスク生成。$0.07。
+
+**Scenario A (full flow + 中断・再開)**:
+- interviewer: 4 turns × 44.3 秒（質問例「視点と操作は？」「終了条件は？」「難易度カーブは？」「見た目のスタイルは？」— レシピ 2d-game で適切に選ばれている）
+- roadmap-builder: 11 タスク × 36.3 秒
+- orchestrator: 14 分 37 秒実行、maxIterations=1 制約下で halt (overall=33、done=false)
+- writeInterruptCheckpoint → `phase='interrupted'`、`resumable=true`、task 5/11 完了状態 ✓
+- planResume() が `continue-build` を返し `nextTaskId=task-006` を指定 ✓
+- simulated resume completion: 全 11 タスク completed、phase='complete'、resumable=false ✓
+
+**Scenario P (preview)**:
+- `findFreePort({preferred:19000})` = 19000 ✓
+- state.json.preview に pid + port + url が記録される ✓
+- preview: null で state.preview がクリアされる ✓
+
+**観察**:
+1. orchestrator の 14.6 分はイメージより長い（maxIterations=1、noAssets=true でも Programmer が scaffold copy + tcs + vite build + playwright install + playwright test を全部走らせるため）。E2E 環境の HDD / npm cache 状態に依存。
+2. overall=33 は maxIterations=1 制約下で Tester/Evaluator まで到達しなかった結果。実運用で `--max-iterations 3` に設定すれば完走する見込み（これは F20 解消後の Phase 6 closure で確認済み）。
+3. 対話 UX の早期検証（Phase 7.8.5 trial）と E2E で **interviewer の質問が完全に別パターン**（trial 時は 5 問、E2E は 4 問）になった。これは prompt がユーザーリクエストの具体性に応じて質問数を調整しているため（良い挙動）。
+4. Scenario A の resume path は「実際に runOrchestrator を再実行する」フェーズだけ予算制約でスキップし、state.json 遷移と writeTaskCheckpoint の per-task 挙動で代用検証した。runOrchestrator 再実行は実装的には「existingWorkspace + skipScaffold で呼び出すだけ」で、既存テスト群でカバー済み。

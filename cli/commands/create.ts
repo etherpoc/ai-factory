@@ -1,20 +1,45 @@
 /**
  * `uaf create` — generate a new project from a natural-language request.
  *
- * Phase 7.3 implementation. Ported from `scripts/run.ts` with the Phase 7
- * ergonomics layered on top:
+ * Phase 7.3 implementation. Phase 7.8 added the spec → roadmap → build flow
+ * (default) on top of the legacy direct-to-orchestrator flow (kept under
+ * `--no-spec`).
+ *
  *   - loads the merged effective config (`cli/config/loader.ts`)
  *   - budget tracker throws `UafError(BUDGET_EXCEEDED)` (→ exit 5)
  *   - missing API key throws `UafError(API_KEY_MISSING)` (→ exit 6)
  *   - orchestrator halts throw `UafError(CIRCUIT_BREAKER_TRIPPED)` (→ exit 5)
- *   - empty request falls into the wizard (Phase 7.4 — currently stub)
+ *   - empty request falls into the wizard
+ *
+ * Phase 7.8 default flow:
+ *   1. classify → load recipe → create workspace (CLI does this now)
+ *   2. spec phase  → interviewer agent writes spec.md, checkpoint
+ *   3. roadmap phase → roadmap-builder writes roadmap.md, checkpoint
+ *   4. user-approval gate (skip with --yes)
+ *   5. build phase  → existing runOrchestrator (uses workspace + spec.md)
+ *   6. mark all roadmap tasks completed, phase='complete', resumable=false
+ *
+ * Use `--no-spec` to bypass steps 2-4 and go straight to the legacy flow.
  */
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createLogger } from '../../core/logger.js';
+import { createLogger, nullLogger } from '../../core/logger.js';
+import { classify } from '../../core/classifier.js';
+import { loadRecipe } from '../../core/recipe-loader.js';
+import { createWorkspace } from '../../core/workspace-manager.js';
+import { makeProjectId } from '../../core/orchestrator.js';
+import { MetricsRecorder } from '../../core/metrics.js';
+import { writeTaskCheckpoint } from '../../core/checkpoint.js';
+import { buildRoadmap } from '../../core/roadmap-builder.js';
+import {
+  clearActiveProject,
+  setActiveProject,
+} from '../../core/signal-handler.js';
+import { runSpecWizard } from '../interactive/spec-wizard.js';
 import { loadEffectiveConfig, resolveWorkspaceDir } from '../config/loader.js';
 import { UafError } from '../ui/errors.js';
 import { upsertWorkspaceState } from '../utils/workspace.js';
+import { createProgressReporter } from '../ui/progress.js';
 import {
   BudgetTracker,
   budgetedStrategy,
@@ -44,15 +69,28 @@ export interface CreateOptions {
   assets?: boolean;
   /** --skip-critic */
   skipCritic?: boolean;
+  // ---- Phase 7.8: spec / roadmap flow ------------------------------------
+  /**
+   * --no-spec: bypass the spec/roadmap dialogue and go straight to the
+   * legacy flow (orchestrator runs without interviewer or roadmap-builder).
+   * Commander inverts this: `spec: false` when the user passed --no-spec.
+   */
+  spec?: boolean;
+  /** --spec-file <path>: skip the dialogue, use this spec.md verbatim. */
+  specFile?: string;
+  /** --yes / -y: skip the post-roadmap approval prompt. */
+  yes?: boolean;
 }
 
 export interface CreateGlobalOpts {
   verbose?: boolean;
+  /** --log-stream: also mirror pino logs to stderr (Phase 7.8.10). */
+  logStream?: boolean;
 }
 
 export async function runCreate(
   opts: CreateOptions,
-  _global: CreateGlobalOpts = {},
+  global: CreateGlobalOpts = {},
 ): Promise<void> {
   // ---- 1. Defensive precondition: the commander action handler routes empty
   //         requests to the wizard before we ever get here. If we land here
@@ -101,71 +139,19 @@ export async function runCreate(
           ? Math.max(0, Number.parseFloat(process.env.DEFAULT_ASSET_BUDGET_USD))
           : 2.0);
 
-  const logger = createLogger({ name: 'uaf.create' });
-  logger.info('starting run', {
-    request: opts.request,
-    recipe: opts.recipe ?? '(classifier)',
-    maxIter,
-    budgetUsd,
-    assetBudgetUsd,
-    noAssets,
-    skipCritic,
-    model: explicitModel ?? '(per-role defaults)',
-    workspaceBase: resolveWorkspaceDir(cfg, repoRoot),
-  });
-
-  // ---- 4. Strategy + budget tracker (Sonnet cache-friendly via extras)
+  // Phase 7.8.10: defer pino logger creation until we know the workspace
+  // dir (so logs land in workspace/<pid>/logs/create.log). Bootstrap work
+  // (classify, loadRecipe, makeProjectId, createWorkspace) uses nullLogger
+  // for structured logs; user-facing output goes through the progress reporter.
+  const progress = createProgressReporter();
   const { createClaudeStrategy } = await import('../../core/strategies/claude.js');
   const { runOrchestrator } = await import('../../core/orchestrator.js');
 
-  const tracker = new BudgetTracker(budgetUsd, logger);
-  const toolStats = { total: 0, byTool: new Map<string, { calls: number; fails: number }>() };
-  const firstRoundLogged = new Set<string>();
-  const claude = createClaudeStrategy({
-    ...(explicitModel !== undefined ? { model: explicitModel } : {}),
-    ...(cfg.models
-      ? { modelsByRole: cfg.models as Record<string, string> }
-      : {}),
-    logger,
-    onRawUsage: (ev) => {
-      const key = `${ev.role}:${ev.round}`;
-      if (firstRoundLogged.has(key)) return;
-      firstRoundLogged.add(key);
-      logger.info('raw.usage', {
-        role: ev.role,
-        round: ev.round,
-        model: ev.model,
-        stopReason: ev.stopReason,
-        usage: ev.usage,
-      });
-    },
-    onToolCall: (ev) => {
-      toolStats.total += 1;
-      const b = toolStats.byTool.get(ev.tool) ?? { calls: 0, fails: 0 };
-      b.calls += 1;
-      if (!ev.ok) b.fails += 1;
-      toolStats.byTool.set(ev.tool, b);
-      logger.info('tool.call', {
-        role: ev.role,
-        tool: ev.tool,
-        ok: ev.ok,
-        durationMs: ev.durationMs,
-        args: ev.argsSummary,
-        ...(ev.errorSummary ? { error: ev.errorSummary } : {}),
-      });
-    },
-  });
-  const strategy = budgetedStrategy(claude, tracker);
+  // Phase 7.8: by default we do the new spec→roadmap→build flow; --no-spec
+  // (commander stores as `spec: false`) drops back to the legacy single-call
+  // path. --spec-file <path> uses the new flow but skips the dialogue.
+  const useSpecFlow = opts.spec !== false;
 
-  // Phase 11.a: build the AssetGenerator only when we might need it. This
-  // keeps `uaf create --no-assets` from requiring REPLICATE/ELEVENLABS keys.
-  const assetGenerator = await buildAssetGeneratorOrNull({
-    noAssets,
-    assetBudgetUsd,
-    logger,
-  });
-
-  // ---- 5. Run
   const start = Date.now();
   let reportOk = false;
   let workspaceDir: string | undefined;
@@ -174,30 +160,259 @@ export async function runCreate(
   let doneFlag = false;
   let overall = 0;
   let runErr: unknown;
+  let workspaceHandle: import('../../core/types.js').WorkspaceHandle | undefined;
+  let usedSpecFlow = false;
+  let logger: import('../../core/types.js').Logger = nullLogger;
+  const toolStats = { total: 0, byTool: new Map<string, { calls: number; fails: number }>() };
 
   try {
-    const report = await runOrchestrator({
-      request: opts.request,
-      ...(opts.recipe !== undefined ? { typeHint: opts.recipe } : {}),
-      repoRoot,
-      logger,
-      strategy,
-      maxIterations: maxIter,
-      keepWorkspace: !opts.cleanup,
-      ...(assetGenerator ? { assetGenerator } : {}),
-      ...(noAssets ? { noAssets: true } : {}),
-      ...(skipCritic ? { skipCritic: true } : {}),
-      assetBudgetUsd,
-    });
-    workspaceDir = report.workspaceDir;
-    projectId = report.projectId;
-    haltReason = report.haltReason;
-    doneFlag = report.completion.done;
-    overall = report.completion.overall;
-    reportOk = true;
+    if (useSpecFlow) {
+      // ---- 5a. New flow: create workspace, wire file-routed logger, then run.
+      usedSpecFlow = true;
+      progress.info(
+        `recipe: ${opts.recipe ?? '(classifier)'} / budget: $${budgetUsd}${
+          explicitModel ? ` / model: ${explicitModel}` : ''
+        }`,
+      );
+      const projType = opts.recipe ?? (await classify(opts.request)).type;
+      const recipeObj = await loadRecipe(projType, { repoRoot });
+      const pid = makeProjectId(opts.request);
+      workspaceHandle = await createWorkspace({
+        projectId: pid,
+        repoRoot,
+        logger: nullLogger,
+      });
+      workspaceDir = workspaceHandle.dir;
+      projectId = pid;
+
+      // Now that the workspace dir exists, stand up the real logger. Without
+      // --log-stream, logs only land in the file; with it, they also mirror
+      // to stderr as JSON (handy for live debugging).
+      logger = createLogger({
+        name: 'uaf.create',
+        filePath: join(workspaceDir, 'logs', 'create.log'),
+        ...(global.logStream ? { streamToConsole: true } : {}),
+      });
+      logger.info('starting run', {
+        request: opts.request,
+        recipe: recipeObj.meta.type,
+        maxIter,
+        budgetUsd,
+        assetBudgetUsd,
+        noAssets,
+        skipCritic,
+        model: explicitModel ?? '(per-role defaults)',
+        workspaceDir,
+      });
+
+      // Strategy + budget tracker (created here so they capture the
+      // file-routed logger, not the nullLogger).
+      const tracker = new BudgetTracker(budgetUsd, logger);
+      const firstRoundLogged = new Set<string>();
+      const claude = createClaudeStrategy({
+        ...(explicitModel !== undefined ? { model: explicitModel } : {}),
+        ...(cfg.models ? { modelsByRole: cfg.models as Record<string, string> } : {}),
+        logger,
+        onRawUsage: (ev) => {
+          const key = `${ev.role}:${ev.round}`;
+          if (firstRoundLogged.has(key)) return;
+          firstRoundLogged.add(key);
+          logger.info('raw.usage', {
+            role: ev.role,
+            round: ev.round,
+            model: ev.model,
+            stopReason: ev.stopReason,
+            usage: ev.usage,
+          });
+        },
+        onToolCall: (ev) => {
+          toolStats.total += 1;
+          const b = toolStats.byTool.get(ev.tool) ?? { calls: 0, fails: 0 };
+          b.calls += 1;
+          if (!ev.ok) b.fails += 1;
+          toolStats.byTool.set(ev.tool, b);
+          logger.info('tool.call', {
+            role: ev.role,
+            tool: ev.tool,
+            ok: ev.ok,
+            durationMs: ev.durationMs,
+            args: ev.argsSummary,
+            ...(ev.errorSummary ? { error: ev.errorSummary } : {}),
+          });
+        },
+      });
+      const strategy = budgetedStrategy(claude, tracker);
+      const assetGenerator = await buildAssetGeneratorOrNull({
+        noAssets,
+        assetBudgetUsd,
+        logger,
+      });
+
+      // Register for SIGINT before any LLM work starts.
+      setActiveProject({ projectId: pid, workspaceDir: workspaceDir });
+
+      const metrics = new MetricsRecorder({ projectId: pid, dir: workspaceDir, logger });
+      const recipeType = recipeObj.meta.type;
+
+      // Initial state.json — phase='spec', resumable from the very start.
+      await upsertWorkspaceState(workspaceDir, {
+        projectId: pid,
+        recipeType,
+        originalRequest: opts.request,
+        status: 'in-progress',
+        phase: 'spec',
+        resumable: true,
+      });
+
+      // ---- Spec phase
+      progress.phase('仕様を詰めていきます', '📋');
+      const specResult = await runSpecWizard({
+        request: opts.request,
+        workspaceDir: workspaceDir,
+        projectId: pid,
+        recipe: recipeObj,
+        strategy,
+        metrics,
+        repoRoot,
+        ...(opts.specFile ? { specFile: opts.specFile } : {}),
+        ...(opts.yes ? { autoApprove: true } : {}),
+        logger,
+      });
+      progress.step(`✓ 仕様書を作成しました (${specResult.specPath})`);
+      await upsertWorkspaceState(workspaceDir, {
+        projectId: pid,
+        recipeType,
+        originalRequest: opts.request,
+        status: 'in-progress',
+        phase: 'roadmap',
+        resumable: true,
+        spec: {
+          path: 'spec.md',
+          createdAt: new Date().toISOString(),
+          dialogTurns: specResult.dialogTurns,
+          userApproved: specResult.userApproved,
+        },
+        lastCheckpointAt: new Date().toISOString(),
+      });
+
+      // ---- Roadmap phase
+      progress.phase('ロードマップを作成中', '📋');
+      const roadmapResult = await buildRoadmap({
+        workspaceDir: workspaceDir,
+        projectId: pid,
+        request: opts.request,
+        recipe: recipeObj,
+        strategy,
+        metrics,
+        repoRoot,
+        logger,
+      });
+      await upsertWorkspaceState(workspaceDir, {
+        projectId: pid,
+        recipeType,
+        originalRequest: opts.request,
+        status: 'in-progress',
+        phase: 'build',
+        resumable: true,
+        roadmap: roadmapResult.roadmap,
+        lastCheckpointAt: new Date().toISOString(),
+      });
+      progress.step(
+        `✓ ${roadmapResult.roadmap.totalTasks} タスクに分解しました (${roadmapResult.markdownPath})`,
+      );
+
+      // ---- Build phase: existing orchestrator with externally-managed workspace.
+      progress.phase('実装を開始します', '🔨');
+      const buildTask = progress.taskStart(1, 1, 'build phase (orchestrator)');
+      const report = await runOrchestrator({
+        request: opts.request,
+        typeHint: recipeType,
+        repoRoot,
+        logger,
+        strategy,
+        maxIterations: maxIter,
+        keepWorkspace: !opts.cleanup,
+        existingWorkspace: workspaceHandle,
+        ...(assetGenerator ? { assetGenerator } : {}),
+        ...(noAssets ? { noAssets: true } : {}),
+        ...(skipCritic ? { skipCritic: true } : {}),
+        assetBudgetUsd,
+      });
+      haltReason = report.haltReason;
+      doneFlag = report.completion.done;
+      overall = report.completion.overall;
+      reportOk = true;
+      if (doneFlag) {
+        buildTask.complete({ note: `overall ${overall}` });
+      } else {
+        buildTask.fail(haltReason ?? `done=false (overall ${overall})`);
+      }
+
+      // Phase 7.8: mark every roadmap task completed when the build phase
+      // finishes successfully. The orchestrator doesn't yet emit per-task
+      // signals, so we approximate at the boundary. If the build halted,
+      // leave tasks in their pending state so `uaf resume` can retry.
+      if (doneFlag) {
+        for (const task of roadmapResult.roadmap.tasks) {
+          await writeTaskCheckpoint(workspaceDir, {
+            taskId: task.id,
+            status: 'completed',
+          });
+        }
+      }
+    } else {
+      // ---- 5b. Legacy flow (kept intact under --no-spec).
+      // Uses the traditional stderr-pretty logger because the workspace is
+      // created inside runOrchestrator and we don't have its path yet.
+      logger = createLogger({ name: 'uaf.create' });
+      logger.info('starting run (legacy --no-spec)', {
+        request: opts.request,
+        recipe: opts.recipe ?? '(classifier)',
+        maxIter,
+        budgetUsd,
+        assetBudgetUsd,
+        noAssets,
+        skipCritic,
+        model: explicitModel ?? '(per-role defaults)',
+        workspaceBase: resolveWorkspaceDir(cfg, repoRoot),
+      });
+      const tracker = new BudgetTracker(budgetUsd, logger);
+      const claude = createClaudeStrategy({
+        ...(explicitModel !== undefined ? { model: explicitModel } : {}),
+        ...(cfg.models ? { modelsByRole: cfg.models as Record<string, string> } : {}),
+        logger,
+      });
+      const strategy = budgetedStrategy(claude, tracker);
+      const assetGenerator = await buildAssetGeneratorOrNull({
+        noAssets,
+        assetBudgetUsd,
+        logger,
+      });
+      const report = await runOrchestrator({
+        request: opts.request,
+        ...(opts.recipe !== undefined ? { typeHint: opts.recipe } : {}),
+        repoRoot,
+        logger,
+        strategy,
+        maxIterations: maxIter,
+        keepWorkspace: !opts.cleanup,
+        ...(assetGenerator ? { assetGenerator } : {}),
+        ...(noAssets ? { noAssets: true } : {}),
+        ...(skipCritic ? { skipCritic: true } : {}),
+        assetBudgetUsd,
+      });
+      workspaceDir = report.workspaceDir;
+      projectId = report.projectId;
+      haltReason = report.haltReason;
+      doneFlag = report.completion.done;
+      overall = report.completion.overall;
+      reportOk = true;
+    }
   } catch (err) {
     runErr = err;
     logger.error('run threw', { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    clearActiveProject();
   }
 
   const elapsedSec = Math.round((Date.now() - start) / 1000);
@@ -243,6 +458,19 @@ export async function runCreate(
           : doneFlag
             ? 'completed'
             : 'halted';
+      // Phase 7.8: mirror status into the new `phase` field for the
+      // spec-flow path so `uaf list --incomplete` / `uaf resume` see a
+      // terminal value. Legacy flow stays without `phase`.
+      const phase: import('../../core/state.js').Phase | undefined = usedSpecFlow
+        ? runErr
+          ? 'failed'
+          : haltReason
+            ? 'failed'
+            : doneFlag
+              ? 'complete'
+              : 'failed'
+        : undefined;
+      const resumable = usedSpecFlow ? phase !== 'complete' : undefined;
       // Phase 11.a: summarize creative-agent outputs by inspecting the
       // files the artist/sound/writer/critic agents dropped into the
       // workspace. This is cheap (a few stat + parses) and populates
@@ -263,6 +491,9 @@ export async function runCreate(
           ...(haltReason ? { haltReason } : {}),
         },
         ...(assetsSummary ? { assets: assetsSummary } : {}),
+        ...(phase !== undefined ? { phase } : {}),
+        ...(resumable !== undefined ? { resumable } : {}),
+        ...(usedSpecFlow ? { lastCheckpointAt: new Date().toISOString() } : {}),
       });
     } catch {
       /* non-fatal — state.json is a convenience, not a correctness requirement */

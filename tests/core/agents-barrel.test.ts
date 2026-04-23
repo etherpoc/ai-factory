@@ -38,6 +38,9 @@ describe('createAllAgents', () => {
       'sound',
       'writer',
       'critic',
+      // Phase 7.8 — pre-orchestrator dialogue + planning agents
+      'interviewer',
+      'roadmap-builder',
     ]) {
       await mkdir(join(root, 'agents', role), { recursive: true });
       await writeFile(
@@ -63,8 +66,10 @@ describe('createAllAgents', () => {
       'critic',
       'director',
       'evaluator',
+      'interviewer',
       'programmer',
       'reviewer',
+      'roadmap-builder',
       'sound',
       'tester',
       'writer',

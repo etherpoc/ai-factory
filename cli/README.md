@@ -14,20 +14,24 @@ Phase 7 で導入された `uaf` コマンドの実装層。Phase 6 までは `s
 cli/
 ├── README.md              # このファイル
 ├── index.ts               # commander ベースのコマンドルーター
-├── commands/              # 各コマンドの実装 (Phase 7.3〜7.5)
-│   ├── create.ts
+├── commands/              # 各コマンドの実装 (Phase 7.3〜7.8)
+│   ├── create.ts          # Phase 7.8: spec→roadmap→build (--no-spec で legacy)
 │   ├── add-recipe.ts
 │   ├── iterate.ts
-│   ├── list.ts
+│   ├── list.ts            # Phase 7.8: --incomplete / --all / PHASE 列
 │   ├── open.ts
 │   ├── recipes.ts
 │   ├── cost.ts
-│   ├── clean.ts
+│   ├── clean.ts           # Phase 7.8: --incomplete オプション
 │   ├── config.ts
-│   └── doctor.ts
-├── interactive/           # 対話ウィザード (Phase 7.4)
+│   ├── doctor.ts
+│   ├── status.ts          # Phase 7.8: 進捗 / phase / per-task badges
+│   ├── resume.ts          # Phase 7.8: 中断プロジェクトの再開
+│   └── preview.ts         # Phase 7.8.6: 種別別 dev サーバ起動
+├── interactive/           # 対話ウィザード (Phase 7.4 / 7.8.2)
 │   ├── wizard.ts
-│   └── prompts.ts
+│   ├── prompts.ts
+│   └── spec-wizard.ts     # Phase 7.8.2: interviewer 駆動の spec 生成
 ├── config/                # 設定ファイルマージ (Phase 7.2)
 │   ├── loader.ts
 │   ├── schema.ts
@@ -73,6 +77,12 @@ cli/
 
 ## 変更履歴
 
+- **2026-04-23 (Phase 7.8)**: spec→roadmap→build フローを追加、3 新コマンド (`status` / `resume` / `preview`) を追加。
+  - **7.8.4**: `cli/commands/create.ts` を改修。`--no-spec` で legacy 直接フロー、デフォルトで spec dialogue → roadmap-builder → 承認 → build。`--spec-file` で対話スキップ、`-y/--yes` で承認自動化。各フェーズで state.json checkpoint。`cli/commands/status.ts` 新設（phase / progress / per-task badges / cost / legacy detection / JSON 出力）。
+  - **7.8.5**: `cli/commands/resume.ts` 新設。`core/resume.ts` の `planResume()` 純粋関数で 5 ブランチ判定（not-resumable / already-complete / rerun-spec / rerun-roadmap / continue-build）。filesystem survey で warning。`cli/commands/list.ts` に `--incomplete` / `--all` + PHASE 列。`cli/commands/clean.ts` に `--incomplete` (resumable も対象に)。
+  - **7.8.6**: `cli/commands/preview.ts` 新設。7 レシピ別ハンドラ (vite × 2、next、api、cli、Expo、Electron)。`cli/utils/ports.ts` の `findFreePort()` で 5173/3000/4173/8080 衝突時に上方向探索、選択ポートをユーザー表示。`--detach`（unref + state.preview に pid+port 記録）/ `--stop <id>` / `--stop-all` / `--run "<args>"`（cli 専用）/ `--no-open` / `--port <n>`。
+  - **インタビュー早期試走** (`scripts/trial-interviewer.ts`): 2d-game + web-app の対話 UX を実 LLM で確認、テンプレートが正しく切り替わることを検証 (合計 ~$0.18)。
+  - 累計テスト 462 件 green、tsc クリーン、Opus 0 calls。
 - **2026-04-22 (Phase 7.7)**: 統合テスト 23 件追加（list-integration 6、cost-integration 5、clean-integration 4、config-command 8）で累計 288 件 pass。E2E: `uaf create --recipe cli --max-iterations 1 --budget-usd 0.50` + `uaf iterate <pid>` の 1 往復を実機で完遂。state.json が create→iterate 間で正しく追記されることを確認。commander の `--` separator 規約を iterate のヘルプと COMMANDS.md に明記（`uaf iterate pid --dry-run -- "--name …"`）。
 - **2026-04-22 (Phase 7.6)**: ドキュメント。README を Phase 7 版に全面書き換え、`docs/COMMANDS.md` / `docs/RECIPES.md` 新設。`uaf cost` は「現存 workspace の累計のみ、真値は Anthropic Console」の乖離原因を明文化。
 - **2026-04-22 (Phase 7.5)**: 残り 8 コマンドを実装。
