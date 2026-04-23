@@ -80,3 +80,11 @@ assets:
     budget:
       maxUsd: 0.50
       maxCount: 10
+
+# Phase 7.8.11: recipe-authored CLI defaults. CLI flags always win; these
+# only kick in when neither --budget-usd nor a user config value is set.
+# Based on Phase 7.8.12 実測: 2d-game create halted at $2.44 with $2.0
+# budget, so $3.50 gives headroom for artist retry / longer tool-use loops.
+defaults:
+  budgetUsd: 3.50
+  assetBudgetUsd: 1.50

@@ -15,13 +15,20 @@ import type {
   Logger,
   OrchestratorInput,
   OrchestratorReport,
+  ProgressEvent,
+  ProgressSink,
   ProjectSpec,
   Recipe,
   SprintReport,
+  SprintStage,
   TestReport,
   Tool,
   WorkspaceHandle,
 } from './types.js';
+import { nullProgressSink } from './types.js';
+import { writeTaskCheckpoint } from './checkpoint.js';
+import { readWorkspaceState } from './state.js';
+import { reconcileAfterScaffold } from './roadmap-reconcile.js';
 import { stubStrategy } from './agent-factory.js';
 import type { AgentStrategy } from './agent-factory.js';
 import { CircuitBreaker, createBreaker, resolveBreakerConfig } from './circuit-breaker.js';
@@ -97,6 +104,14 @@ export interface OrchestratorOptions extends OrchestratorInput {
   skipCritic?: boolean;
   /** Asset budget (USD). 0 auto-skips artist + sound even if they're in `agents.optional`. */
   assetBudgetUsd?: number;
+  // ---- Phase 7.8.12: progress signals ------------------------------------
+  /**
+   * Sink for fine-grained progress events (phase-start/end, sprint-stage-*,
+   * hint, reconcile). Omit for silent/legacy behavior — the orchestrator
+   * still works identically. The sink must be safe to call synchronously
+   * (the bridge typically just writes to stderr / updates a timer).
+   */
+  progressSink?: ProgressSink;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +160,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
   const repoRoot = resolve(opts.repoRoot ?? process.cwd());
   const logger = opts.logger ?? createLogger({ name: 'uaf.orchestrator' });
   const deps = opts.deps ?? {};
+  const sink: ProgressSink = opts.progressSink ?? nullProgressSink;
 
   // 1. Classify
   const spec = await (deps.classify ?? defaultClassify)(opts.request, opts.typeHint);
@@ -197,63 +213,104 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     // 4. Director → spec.md (Phase 7.8: skip if interviewer already wrote it).
     if (await fileExists(join(workspace.dir, 'spec.md'))) {
       artifacts.spec = await readFile(join(workspace.dir, 'spec.md'), 'utf8');
+      sink.emit({ kind: 'phase-skipped', phase: 'director', reason: 'spec.md 既存' });
       logger.info('director: skipped (spec.md already present)');
     } else {
-      await invokeInto(
-        agents.director,
-        artifactInput(spec, workspace, recipe, artifacts),
-        artifacts,
-      );
-      if (artifacts.spec) {
-        await writeFile(join(workspace.dir, 'spec.md'), artifacts.spec, 'utf8');
-      }
+      await runPhase(sink, 'director', 'Director', async () => {
+        await invokeInto(
+          agents.director,
+          artifactInput(spec, workspace, recipe, artifacts),
+          artifacts,
+        );
+        if (artifacts.spec) {
+          await writeFile(join(workspace.dir, 'spec.md'), artifacts.spec, 'utf8');
+        }
+      });
     }
 
     // 5. Architect → design.md (skip if it already exists, e.g. on resume).
     if (await fileExists(join(workspace.dir, 'design.md'))) {
       artifacts.design = await readFile(join(workspace.dir, 'design.md'), 'utf8');
+      sink.emit({ kind: 'phase-skipped', phase: 'architect', reason: 'design.md 既存' });
       logger.info('architect: skipped (design.md already present)');
     } else {
-      await invokeInto(
-        agents.architect,
-        artifactInput(spec, workspace, recipe, artifacts),
-        artifacts,
-      );
-      if (artifacts.design) {
-        await writeFile(join(workspace.dir, 'design.md'), artifacts.design, 'utf8');
-      }
+      await runPhase(sink, 'architect', 'Architect', async () => {
+        await invokeInto(
+          agents.architect,
+          artifactInput(spec, workspace, recipe, artifacts),
+          artifacts,
+        );
+        if (artifacts.design) {
+          await writeFile(join(workspace.dir, 'design.md'), artifacts.design, 'utf8');
+        }
+      });
     }
 
     // 6. Scaffold (Phase 7.8: skip when caller already populated workspace,
     // e.g. on resume after a crash mid-build).
     if (!opts.skipScaffold) {
-      await (deps.scaffold ?? defaultScaffold)(recipe, workspace, logger, repoRoot);
+      await runPhase(sink, 'scaffold', 'Scaffold', async () => {
+        await (deps.scaffold ?? defaultScaffold)(recipe, workspace, logger, repoRoot);
+      });
+      // Phase 7.8.12: after scaffold, mark any "Setup"-phase roadmap tasks
+      // as completed based on on-disk evidence (package.json exists, etc.).
+      // Warnings are display-only — failure here never aborts the build.
+      await reconcileScaffoldTasks(workspace.dir, sink, logger);
     } else {
+      sink.emit({ kind: 'phase-skipped', phase: 'scaffold', reason: 'skipScaffold=true' });
       logger.info('scaffold: skipped (skipScaffold=true)');
     }
 
     // 6.5 (Phase 11.a) Creative phase — writer / artist / sound run in
     // parallel. They all read spec.md + design.md (via tools) and write
     // their manifests; Programmer reads them in step 7.
-    const creativeTasks: Array<Promise<unknown>> = [];
-    for (const role of ['writer', 'artist', 'sound'] as const) {
-      if (!activeRoles.has(role)) continue;
-      logger.info('creative agent invoked', { role });
-      creativeTasks.push(
-        invokeInto(agents[role], artifactInput(spec, workspace, recipe, artifacts), artifacts).catch(
-          (err: unknown) => {
-            // Creative-agent failures are non-fatal: log and continue so the
-            // build can still produce a working (if visually bare) project.
-            logger.warn('creative agent threw', {
-              role,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          },
-        ),
-      );
-    }
-    if (creativeTasks.length > 0) {
+    const creativeRoles = (['writer', 'artist', 'sound'] as const).filter((r) => activeRoles.has(r));
+    if (creativeRoles.length > 0) {
+      sink.emit({
+        kind: 'phase-start',
+        phase: 'creative',
+        label: `Creative (${creativeRoles.join(' / ')})`,
+      });
+      const creativeStart = Date.now();
+      const creativeTasks: Array<Promise<unknown>> = [];
+      for (const role of creativeRoles) {
+        logger.info('creative agent invoked', { role });
+        const roleLabel = role.charAt(0).toUpperCase() + role.slice(1);
+        sink.emit({ kind: 'creative-agent-start', role, label: roleLabel });
+        const agentStart = Date.now();
+        creativeTasks.push(
+          invokeInto(agents[role], artifactInput(spec, workspace, recipe, artifacts), artifacts).then(
+            () => {
+              sink.emit({
+                kind: 'creative-agent-end',
+                role,
+                ok: true,
+                durationMs: Date.now() - agentStart,
+              });
+            },
+            (err: unknown) => {
+              // Creative-agent failures are non-fatal: log and continue so the
+              // build can still produce a working (if visually bare) project.
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn('creative agent threw', { role, error: msg });
+              sink.emit({
+                kind: 'creative-agent-end',
+                role,
+                ok: false,
+                durationMs: Date.now() - agentStart,
+                errorMessage: msg,
+              });
+            },
+          ),
+        );
+      }
       await Promise.all(creativeTasks);
+      sink.emit({
+        kind: 'phase-end',
+        phase: 'creative',
+        ok: true,
+        durationMs: Date.now() - creativeStart,
+      });
     }
 
     // 7. Loop
@@ -267,28 +324,52 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
     let lastScore: CompletionScore | undefined;
 
     while (!breaker.tripped()) {
+      const sprintNum = breaker.state.iteration + 1;
       const sprint: SprintReport = {
-        iteration: breaker.state.iteration + 1,
+        iteration: sprintNum,
         reviewFindings: [],
         errors: [],
       };
+      sink.emit({ kind: 'sprint-start', sprint: sprintNum, maxSprints: breakerCfg.maxIterations });
       try {
-        await invokeInto(
-          agents.programmer,
-          artifactInput(spec, workspace, recipe, artifacts),
-          artifacts,
-        );
+        await runStage(sink, sprintNum, 'programmer', 'Programmer', async () => {
+          await invokeInto(
+            agents.programmer,
+            artifactInput(spec, workspace, recipe, artifacts),
+            artifacts,
+          );
+        });
 
-        const buildResult = await (deps.build ?? defaultBuild)(recipe, workspace);
+        const buildResult = await runStage(
+          sink,
+          sprintNum,
+          'build',
+          'Build',
+          async () => {
+            sink.emit({ kind: 'hint', hint: 'build' });
+            return (deps.build ?? defaultBuild)(recipe, workspace);
+          },
+          (r) => (r.ok ? 'build OK' : `build failed`),
+        );
         if (!buildResult.ok)
           sprint.errors.push(`build failed: ${truncate(buildResult.output, 200)}`);
 
-        await invokeInto(
-          agents.tester,
-          artifactInput(spec, workspace, recipe, artifacts),
-          artifacts,
+        const testReport = await runStage(
+          sink,
+          sprintNum,
+          'tester',
+          'Tester',
+          async () => {
+            await invokeInto(
+              agents.tester,
+              artifactInput(spec, workspace, recipe, artifacts),
+              artifacts,
+            );
+            sink.emit({ kind: 'hint', hint: 'test' });
+            return (deps.runTests ?? defaultRunTests)(recipe, workspace);
+          },
+          (r) => `${r.passed}/${r.passed + r.failed} tests`,
         );
-        const testReport = await (deps.runTests ?? defaultRunTests)(recipe, workspace);
         sprint.testReport = testReport;
         artifacts.testReport = testReport;
         if (testReport.failed > 0) {
@@ -299,49 +380,74 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
         // subjective feedback is visible in the same sprint's REPORT.md.
         // Failures are non-fatal — critic is opinion, not correctness.
         if (activeRoles.has('critic')) {
-          try {
+          await runStage(
+            sink,
+            sprintNum,
+            'critic',
+            'Critic',
+            async () => {
+              try {
+                await invokeInto(
+                  agents.critic,
+                  artifactInput(spec, workspace, recipe, artifacts),
+                  artifacts,
+                );
+              } catch (err) {
+                logger.warn('critic threw', {
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            },
+          );
+        }
+
+        await runStage(sink, sprintNum, 'reviewer', 'Reviewer', async () => {
+          await invokeInto(
+            agents.reviewer,
+            artifactInput(spec, workspace, recipe, artifacts),
+            artifacts,
+          );
+        });
+        sprint.reviewFindings = artifacts.reviewFindings ?? [];
+
+        const score = await runStage(
+          sink,
+          sprintNum,
+          'evaluator',
+          'Evaluator',
+          async () => {
             await invokeInto(
-              agents.critic,
+              agents.evaluator,
               artifactInput(spec, workspace, recipe, artifacts),
               artifacts,
             );
-          } catch (err) {
-            logger.warn('critic threw', {
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-
-        await invokeInto(
-          agents.reviewer,
-          artifactInput(spec, workspace, recipe, artifacts),
-          artifacts,
-        );
-        sprint.reviewFindings = artifacts.reviewFindings ?? [];
-
-        await invokeInto(
-          agents.evaluator,
-          artifactInput(spec, workspace, recipe, artifacts),
-          artifacts,
-        );
-        const deterministic = await (deps.evaluate ?? defaultEvaluate)(
-          recipe,
-          artifacts,
-          buildResult.ok,
-          testReport,
-          workspace,
-          repoRoot,
-        );
-        const score = mergeCompletion(
-          deterministic,
-          artifacts.completion,
-          recipe.evaluation.criteria,
+            const deterministic = await (deps.evaluate ?? defaultEvaluate)(
+              recipe,
+              artifacts,
+              buildResult.ok,
+              testReport,
+              workspace,
+              repoRoot,
+            );
+            return mergeCompletion(
+              deterministic,
+              artifacts.completion,
+              recipe.evaluation.criteria,
+            );
+          },
+          (s) => `overall ${s.overall}${s.done ? ' / done' : ''}`,
         );
         artifacts.completion = score;
         sprint.completion = score;
         lastScore = score;
 
         iterations.push(sprint);
+        sink.emit({
+          kind: 'sprint-end',
+          sprint: sprintNum,
+          done: score.done,
+          overall: score.overall,
+        });
 
         if (score.done) {
           logger.info('evaluator declared done', { overall: score.overall });
@@ -354,6 +460,7 @@ export async function runOrchestrator(opts: OrchestratorOptions): Promise<Orches
         sprint.errors.push(msg);
         iterations.push(sprint);
         logger.error('sprint threw', { error: msg });
+        sink.emit({ kind: 'sprint-end', sprint: sprintNum, done: false, overall: 0 });
         breaker.tick(msg);
       }
     }
@@ -621,6 +728,99 @@ function judgeCriterion(
           };
     default:
       return { passed: false, evidence: UNKNOWN_EVIDENCE };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Progress helpers (Phase 7.8.12)
+// ---------------------------------------------------------------------------
+
+async function runPhase(
+  sink: ProgressSink,
+  phase: Extract<ProgressEvent, { kind: 'phase-start' }>['phase'],
+  label: string,
+  work: () => Promise<void>,
+): Promise<void> {
+  sink.emit({ kind: 'phase-start', phase, label });
+  const start = Date.now();
+  try {
+    await work();
+    sink.emit({ kind: 'phase-end', phase, ok: true, durationMs: Date.now() - start });
+  } catch (err) {
+    sink.emit({
+      kind: 'phase-end',
+      phase,
+      ok: false,
+      durationMs: Date.now() - start,
+      note: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
+async function runStage<T>(
+  sink: ProgressSink,
+  sprint: number,
+  stage: SprintStage,
+  label: string,
+  work: () => Promise<T>,
+  noteFrom?: (result: T) => string,
+): Promise<T> {
+  sink.emit({ kind: 'sprint-stage-start', sprint, stage, label });
+  const start = Date.now();
+  try {
+    const result = await work();
+    sink.emit({
+      kind: 'sprint-stage-end',
+      sprint,
+      stage,
+      ok: true,
+      durationMs: Date.now() - start,
+      ...(noteFrom ? { note: noteFrom(result) } : {}),
+    });
+    return result;
+  } catch (err) {
+    sink.emit({
+      kind: 'sprint-stage-end',
+      sprint,
+      stage,
+      ok: false,
+      durationMs: Date.now() - start,
+      note: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
+async function reconcileScaffoldTasks(
+  workspaceDir: string,
+  sink: ProgressSink,
+  logger: Logger,
+): Promise<void> {
+  try {
+    const state = await readWorkspaceState(workspaceDir);
+    if (!state?.roadmap?.tasks) return;
+    const result = await reconcileAfterScaffold({
+      workspaceDir,
+      tasks: state.roadmap.tasks,
+    });
+    for (const taskId of result.completedTaskIds) {
+      await writeTaskCheckpoint(workspaceDir, { taskId, status: 'completed' }).catch((err) => {
+        logger.warn('reconcile checkpoint failed', {
+          taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+    sink.emit({
+      kind: 'reconcile',
+      completedTaskIds: result.completedTaskIds,
+      warnings: result.warnings,
+    });
+  } catch (err) {
+    logger.warn('scaffold reconcile threw', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

@@ -77,3 +77,10 @@ evaluation:
 agents:
   required: [director, architect, programmer, tester, reviewer, evaluator]
   optional: [writer]
+
+# Phase 7.8.11: api is heavier than cli (routes + schema validation + tests)
+# but still has no creative agents. $1.20 covers a single programmer call
+# plus tester/reviewer/evaluator with margin.
+defaults:
+  budgetUsd: 1.20
+  assetBudgetUsd: 0.00

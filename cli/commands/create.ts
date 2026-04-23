@@ -40,6 +40,13 @@ import { loadEffectiveConfig, resolveWorkspaceDir } from '../config/loader.js';
 import { UafError } from '../ui/errors.js';
 import { upsertWorkspaceState } from '../utils/workspace.js';
 import { createProgressReporter } from '../ui/progress.js';
+import { createProgressBridge } from '../progress-bridge.js';
+import { roadmapGroupsFromTasks } from '../utils/roadmap-groups.js';
+import {
+  describeBudget,
+  resolveAssetBudgetUsd,
+  resolveBudgetUsd,
+} from '../utils/budget-resolve.js';
 import {
   BudgetTracker,
   budgetedStrategy,
@@ -115,10 +122,19 @@ export async function runCreate(
   const { effective: cfg } = await loadEffectiveConfig();
   const repoRoot = process.cwd();
 
-  const budgetUsd = Math.max(
-    0.01,
-    opts.budgetUsd !== undefined ? Number.parseFloat(opts.budgetUsd) : cfg.budget_usd ?? 2.0,
-  );
+  // Phase 7.8.11: resolve recipe first so its `defaults.budgetUsd` /
+  // `defaults.assetBudgetUsd` can feed budget resolution below. The classifier
+  // runs only when --recipe wasn't supplied; either way we have a concrete
+  // type by the time we load the YAML.
+  const recipeTypeForBudget = opts.recipe ?? (await classify(opts.request)).type;
+  const recipeForBudget = await loadRecipe(recipeTypeForBudget, { repoRoot });
+
+  const resolvedBudget = resolveBudgetUsd({
+    ...(opts.budgetUsd !== undefined ? { cliFlag: opts.budgetUsd } : {}),
+    recipe: recipeForBudget,
+    config: cfg,
+  });
+  const budgetUsd = resolvedBudget.usd;
   const maxIter = Math.max(
     1,
     opts.maxIterations !== undefined
@@ -131,13 +147,15 @@ export async function runCreate(
   // (commander inverts); `--asset-budget-usd 0` drops artist/sound too.
   const noAssets = opts.assets === false;
   const skipCritic = opts.skipCritic === true;
-  const assetBudgetUsd =
-    opts.assetBudgetUsd !== undefined
-      ? Math.max(0, Number.parseFloat(opts.assetBudgetUsd))
-      : cfg.assets?.budget_usd ??
-        (process.env.DEFAULT_ASSET_BUDGET_USD
-          ? Math.max(0, Number.parseFloat(process.env.DEFAULT_ASSET_BUDGET_USD))
-          : 2.0);
+  const resolvedAssetBudget = resolveAssetBudgetUsd({
+    ...(opts.assetBudgetUsd !== undefined ? { cliFlag: opts.assetBudgetUsd } : {}),
+    ...(process.env.DEFAULT_ASSET_BUDGET_USD !== undefined
+      ? { env: process.env.DEFAULT_ASSET_BUDGET_USD }
+      : {}),
+    recipe: recipeForBudget,
+    config: cfg,
+  });
+  const assetBudgetUsd = resolvedAssetBudget.usd;
 
   // Phase 7.8.10: defer pino logger creation until we know the workspace
   // dir (so logs land in workspace/<pid>/logs/create.log). Bootstrap work
@@ -170,12 +188,13 @@ export async function runCreate(
       // ---- 5a. New flow: create workspace, wire file-routed logger, then run.
       usedSpecFlow = true;
       progress.info(
-        `recipe: ${opts.recipe ?? '(classifier)'} / budget: $${budgetUsd}${
-          explicitModel ? ` / model: ${explicitModel}` : ''
-        }`,
+        `recipe: ${opts.recipe ?? `(classifier: ${recipeTypeForBudget})`} / budget: ${describeBudget(
+          resolvedBudget,
+          recipeTypeForBudget,
+        )}${explicitModel ? ` / model: ${explicitModel}` : ''}`,
       );
-      const projType = opts.recipe ?? (await classify(opts.request)).type;
-      const recipeObj = await loadRecipe(projType, { repoRoot });
+      // Reuse the recipe we already loaded for budget resolution.
+      const recipeObj = recipeForBudget;
       const pid = makeProjectId(opts.request);
       workspaceHandle = await createWorkspace({
         projectId: pid,
@@ -207,8 +226,25 @@ export async function runCreate(
 
       // Strategy + budget tracker (created here so they capture the
       // file-routed logger, not the nullLogger).
-      const tracker = new BudgetTracker(budgetUsd, logger);
+      const tracker = new BudgetTracker(budgetUsd, logger, {
+        ...(recipeObj.defaults?.budgetUsd !== undefined
+          ? { recipeSuggestedUsd: recipeObj.defaults.budgetUsd }
+          : {}),
+        onWarn: (ev) => {
+          progress.warn(
+            `予算 ${ev.thresholdPct}% 到達: $${ev.totalUsd.toFixed(4)} / $${ev.limitUsd.toFixed(2)}`,
+          );
+          logger.warn('budget.threshold', {
+            thresholdPct: ev.thresholdPct,
+            totalUsd: ev.totalUsd,
+            limitUsd: ev.limitUsd,
+          });
+        },
+      });
       const firstRoundLogged = new Set<string>();
+      // Phase 7.8.12: build the progress bridge early so we can wire
+      // onToolStart (image / audio hints) into the claude strategy below.
+      const bridge = createProgressBridge(progress, { maxSprints: maxIter });
       const claude = createClaudeStrategy({
         ...(explicitModel !== undefined ? { model: explicitModel } : {}),
         ...(cfg.models ? { modelsByRole: cfg.models as Record<string, string> } : {}),
@@ -224,6 +260,13 @@ export async function runCreate(
             stopReason: ev.stopReason,
             usage: ev.usage,
           });
+        },
+        onToolStart: (ev) => {
+          if (ev.tool === 'generate_image') {
+            bridge.sink.emit({ kind: 'hint', hint: 'image' });
+          } else if (ev.tool === 'generate_audio') {
+            bridge.sink.emit({ kind: 'hint', hint: 'audio' });
+          }
         },
         onToolCall: (ev) => {
           toolStats.total += 1;
@@ -323,29 +366,35 @@ export async function runCreate(
 
       // ---- Build phase: existing orchestrator with externally-managed workspace.
       progress.phase('実装を開始します', '🔨');
-      const buildTask = progress.taskStart(1, 1, 'build phase (orchestrator)');
-      const report = await runOrchestrator({
-        request: opts.request,
-        typeHint: recipeType,
-        repoRoot,
-        logger,
-        strategy,
-        maxIterations: maxIter,
-        keepWorkspace: !opts.cleanup,
-        existingWorkspace: workspaceHandle,
-        ...(assetGenerator ? { assetGenerator } : {}),
-        ...(noAssets ? { noAssets: true } : {}),
-        ...(skipCritic ? { skipCritic: true } : {}),
-        assetBudgetUsd,
+      // Phase 7.8.12: emit roadmap bird-eye view so the user sees the full
+      // task list before the per-phase progress starts streaming.
+      bridge.sink.emit({
+        kind: 'roadmap-overview',
+        groups: roadmapGroupsFromTasks(roadmapResult.roadmap.tasks),
+        totalTasks: roadmapResult.roadmap.totalTasks,
       });
-      haltReason = report.haltReason;
-      doneFlag = report.completion.done;
-      overall = report.completion.overall;
-      reportOk = true;
-      if (doneFlag) {
-        buildTask.complete({ note: `overall ${overall}` });
-      } else {
-        buildTask.fail(haltReason ?? `done=false (overall ${overall})`);
+      try {
+        const report = await runOrchestrator({
+          request: opts.request,
+          typeHint: recipeType,
+          repoRoot,
+          logger,
+          strategy,
+          maxIterations: maxIter,
+          keepWorkspace: !opts.cleanup,
+          existingWorkspace: workspaceHandle,
+          ...(assetGenerator ? { assetGenerator } : {}),
+          ...(noAssets ? { noAssets: true } : {}),
+          ...(skipCritic ? { skipCritic: true } : {}),
+          assetBudgetUsd,
+          progressSink: bridge.sink,
+        });
+        haltReason = report.haltReason;
+        doneFlag = report.completion.done;
+        overall = report.completion.overall;
+        reportOk = true;
+      } finally {
+        bridge.close();
       }
 
       // Phase 7.8: mark every roadmap task completed when the build phase
@@ -370,13 +419,29 @@ export async function runCreate(
         recipe: opts.recipe ?? '(classifier)',
         maxIter,
         budgetUsd,
+        budgetSource: resolvedBudget.source,
         assetBudgetUsd,
+        assetBudgetSource: resolvedAssetBudget.source,
         noAssets,
         skipCritic,
         model: explicitModel ?? '(per-role defaults)',
         workspaceBase: resolveWorkspaceDir(cfg, repoRoot),
       });
-      const tracker = new BudgetTracker(budgetUsd, logger);
+      const tracker = new BudgetTracker(budgetUsd, logger, {
+        ...(recipeForBudget.defaults?.budgetUsd !== undefined
+          ? { recipeSuggestedUsd: recipeForBudget.defaults.budgetUsd }
+          : {}),
+        onWarn: (ev) => {
+          process.stderr.write(
+            `⚠ 予算 ${ev.thresholdPct}% 到達: $${ev.totalUsd.toFixed(4)} / $${ev.limitUsd.toFixed(2)}\n`,
+          );
+          logger.warn('budget.threshold', {
+            thresholdPct: ev.thresholdPct,
+            totalUsd: ev.totalUsd,
+            limitUsd: ev.limitUsd,
+          });
+        },
+      });
       const claude = createClaudeStrategy({
         ...(explicitModel !== undefined ? { model: explicitModel } : {}),
         ...(cfg.models ? { modelsByRole: cfg.models as Record<string, string> } : {}),

@@ -167,3 +167,9 @@ assets:
     budget:
       maxUsd: 0.20
       maxCount: 2
+
+# Phase 7.8.11: desktop-app is mid-complexity (Electron main/renderer split,
+# IPC bridge tests). Similar envelope to mobile-app.
+defaults:
+  budgetUsd: 2.50
+  assetBudgetUsd: 0.50

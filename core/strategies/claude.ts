@@ -63,6 +63,13 @@ export interface ClaudeStrategyOptions {
   cacheSystemPrompt?: boolean;
   /** Called once per tool invocation (F5 observability). */
   onToolCall?: (event: ToolCallEvent) => void;
+  /**
+   * Fires right before a tool is invoked — useful for UI hint updates when a
+   * tool is slow (generate_image / generate_audio can run for minutes). Fires
+   * once per tool call even when multiple tool_use blocks run in parallel.
+   * Phase 7.8.12.
+   */
+  onToolStart?: (event: ToolStartEvent) => void;
   /** Called once per raw API response with the full usage object (F4 debugging). */
   onRawUsage?: (event: RawUsageEvent) => void;
   logger?: Logger;
@@ -75,6 +82,12 @@ export interface ToolCallEvent {
   ok: boolean;
   argsSummary: string;
   errorSummary?: string;
+}
+
+export interface ToolStartEvent {
+  role: AgentRole;
+  tool: string;
+  argsSummary: string;
 }
 
 export interface RawUsageEvent {
@@ -95,6 +108,7 @@ export function createClaudeStrategy(opts: ClaudeStrategyOptions = {}): AgentStr
   const maxTokens = opts.maxTokens ?? 8000;
   const cache = opts.cacheSystemPrompt ?? true;
   const onToolCall = opts.onToolCall;
+  const onToolStart = opts.onToolStart;
   const onRawUsage = opts.onRawUsage;
   const logger = opts.logger ?? nullLogger;
 
@@ -173,6 +187,7 @@ export function createClaudeStrategy(opts: ClaudeStrategyOptions = {}): AgentStr
                 is_error: true,
               };
             }
+            onToolStart?.({ role, tool: tu.name, argsSummary });
             const start = Date.now();
             const result = await impl.run(args, toolCtx);
             const durationMs = Date.now() - start;

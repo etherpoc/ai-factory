@@ -11,6 +11,13 @@ import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { createLogger } from '../../core/logger.js';
 import { createProgressReporter } from '../ui/progress.js';
+import { createProgressBridge } from '../progress-bridge.js';
+import { roadmapGroupsFromTasks } from '../utils/roadmap-groups.js';
+import {
+  describeBudget,
+  resolveAssetBudgetUsd,
+  resolveBudgetUsd,
+} from '../utils/budget-resolve.js';
 import { MetricsRecorder } from '../../core/metrics.js';
 import { buildRoadmap } from '../../core/roadmap-builder.js';
 import { loadRecipe } from '../../core/recipe-loader.js';
@@ -142,10 +149,15 @@ export async function runResume(
   }
 
   // ---- Build the strategy + budget tracker (same shape as runCreate).
-  const budgetUsd = Math.max(
-    0.01,
-    opts.budgetUsd !== undefined ? Number.parseFloat(opts.budgetUsd) : cfg.budget_usd ?? 2.0,
-  );
+  // Phase 7.8.11: load the recipe first so its defaults feed budget resolution.
+  const recipeTypeForBudget = project.state!.recipeType;
+  const recipeForBudget = await loadRecipe(recipeTypeForBudget, { repoRoot });
+  const resolvedBudget = resolveBudgetUsd({
+    ...(opts.budgetUsd !== undefined ? { cliFlag: opts.budgetUsd } : {}),
+    recipe: recipeForBudget,
+    config: cfg,
+  });
+  const budgetUsd = resolvedBudget.usd;
   const maxIter = Math.max(
     1,
     opts.maxIterations !== undefined
@@ -156,13 +168,15 @@ export async function runResume(
 
   const noAssets = opts.assets === false;
   const skipCritic = opts.skipCritic === true;
-  const assetBudgetUsd =
-    opts.assetBudgetUsd !== undefined
-      ? Math.max(0, Number.parseFloat(opts.assetBudgetUsd))
-      : cfg.assets?.budget_usd ??
-        (process.env.DEFAULT_ASSET_BUDGET_USD
-          ? Math.max(0, Number.parseFloat(process.env.DEFAULT_ASSET_BUDGET_USD))
-          : 2.0);
+  const resolvedAssetBudget = resolveAssetBudgetUsd({
+    ...(opts.assetBudgetUsd !== undefined ? { cliFlag: opts.assetBudgetUsd } : {}),
+    ...(process.env.DEFAULT_ASSET_BUDGET_USD !== undefined
+      ? { env: process.env.DEFAULT_ASSET_BUDGET_USD }
+      : {}),
+    recipe: recipeForBudget,
+    config: cfg,
+  });
+  const assetBudgetUsd = resolvedAssetBudget.usd;
 
   // Phase 7.8.10: file-routed logger under the project workspace.
   const logger = createLogger({
@@ -176,13 +190,46 @@ export async function runResume(
     plan: plan.action.kind,
   });
 
+  progress.info(
+    `budget: ${describeBudget(resolvedBudget, recipeTypeForBudget)}${
+      resolvedAssetBudget.usd > 0
+        ? ` / asset: ${describeBudget(resolvedAssetBudget, recipeTypeForBudget)}`
+        : ''
+    }`,
+  );
+
   const { createClaudeStrategy } = await import('../../core/strategies/claude.js');
   const { runOrchestrator } = await import('../../core/orchestrator.js');
-  const tracker = new BudgetTracker(budgetUsd, logger);
+  // Phase 7.8.12: build the progress bridge early so we can wire onToolStart
+  // (image / audio hints) into the claude strategy below.
+  const bridge = createProgressBridge(progress, { maxSprints: maxIter });
+  // Phase 7.8.11: budget tracker with warn-threshold + recipe-suggested hint.
+  const tracker = new BudgetTracker(budgetUsd, logger, {
+    ...(recipeForBudget.defaults?.budgetUsd !== undefined
+      ? { recipeSuggestedUsd: recipeForBudget.defaults.budgetUsd }
+      : {}),
+    onWarn: (ev) => {
+      progress.warn(
+        `予算 ${ev.thresholdPct}% 到達: $${ev.totalUsd.toFixed(4)} / $${ev.limitUsd.toFixed(2)}`,
+      );
+      logger.warn('budget.threshold', {
+        thresholdPct: ev.thresholdPct,
+        totalUsd: ev.totalUsd,
+        limitUsd: ev.limitUsd,
+      });
+    },
+  });
   const claude = createClaudeStrategy({
     ...(explicitModel !== undefined ? { model: explicitModel } : {}),
     ...(cfg.models ? { modelsByRole: cfg.models as Record<string, string> } : {}),
     logger,
+    onToolStart: (ev) => {
+      if (ev.tool === 'generate_image') {
+        bridge.sink.emit({ kind: 'hint', hint: 'image' });
+      } else if (ev.tool === 'generate_audio') {
+        bridge.sink.emit({ kind: 'hint', hint: 'audio' });
+      }
+    },
   });
   const strategy = budgetedStrategy(claude, tracker);
 
@@ -195,8 +242,8 @@ export async function runResume(
   };
   setActiveProject({ projectId: project.projectId, workspaceDir: project.dir });
 
-  const recipeType = project.state!.recipeType;
-  const recipe = await loadRecipe(recipeType, { repoRoot });
+  const recipeType = recipeTypeForBudget;
+  const recipe = recipeForBudget;
   const metrics = new MetricsRecorder({
     projectId: project.projectId,
     dir: project.dir,
@@ -271,20 +318,35 @@ export async function runResume(
     const tasksToFinish = refreshed.state?.roadmap?.tasks ?? [];
 
     progress.phase('実装を再開します', '🔨');
-    const report = await runOrchestrator({
-      request,
-      typeHint: recipeType,
-      repoRoot,
-      logger,
-      strategy,
-      maxIterations: maxIter,
-      keepWorkspace: true,
-      existingWorkspace: workspaceHandle,
-      skipScaffold: files.packageJson, // already populated
-      ...(noAssets ? { noAssets: true } : {}),
-      ...(skipCritic ? { skipCritic: true } : {}),
-      assetBudgetUsd,
-    });
+    // Phase 7.8.12: emit the roadmap bird-eye view so users see the full
+    // task list immediately after "続行しますか? Yes", not after 20 min.
+    if (tasksToFinish.length > 0) {
+      bridge.sink.emit({
+        kind: 'roadmap-overview',
+        groups: roadmapGroupsFromTasks(tasksToFinish),
+        totalTasks: tasksToFinish.length,
+      });
+    }
+    let report: import('../../core/types.js').OrchestratorReport;
+    try {
+      report = await runOrchestrator({
+        request,
+        typeHint: recipeType,
+        repoRoot,
+        logger,
+        strategy,
+        maxIterations: maxIter,
+        keepWorkspace: true,
+        existingWorkspace: workspaceHandle,
+        skipScaffold: files.packageJson, // already populated
+        ...(noAssets ? { noAssets: true } : {}),
+        ...(skipCritic ? { skipCritic: true } : {}),
+        assetBudgetUsd,
+        progressSink: bridge.sink,
+      });
+    } finally {
+      bridge.close();
+    }
     haltReason = report.haltReason;
     doneFlag = report.completion.done;
     overall = report.completion.overall;

@@ -120,6 +120,18 @@ const AssetsSpecSchema = z
   })
   .optional();
 
+// ---------------------------------------------------------------------------
+// Phase 7.8.11: recipe-authored defaults for --budget-usd / --asset-budget-usd.
+// Both optional so pre-7.8.11 recipes still load.
+// ---------------------------------------------------------------------------
+
+const DefaultsSchema = z
+  .object({
+    budgetUsd: z.number().positive().optional(),
+    assetBudgetUsd: z.number().nonnegative().optional(),
+  })
+  .optional();
+
 export const RecipeSchema = z.object({
   meta: MetaSchema,
   stack: StackSchema,
@@ -135,6 +147,8 @@ export const RecipeSchema = z.object({
   // pre-Phase-11.a recipe.yaml files.
   agents: AgentsSpecSchema,
   assets: AssetsSpecSchema,
+  // Phase 7.8.11: recipe-authored CLI defaults (budget, asset budget).
+  defaults: DefaultsSchema,
 });
 
 // ---------------------------------------------------------------------------

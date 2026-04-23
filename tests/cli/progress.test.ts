@@ -50,7 +50,8 @@ describe('ProgressReporter', () => {
     // complete with an explicit elapsed so the test is deterministic
     h.complete({ elapsedMs: 12_340, costUsd: 0.0321, note: 'overall 95' });
     const out = read();
-    expect(out).toContain('[3/11] Phaser エンジン初期化');
+    // Phase 7.8.12: labels are right-padded so columns align (e.g. [ 3/11]).
+    expect(out).toContain('[ 3/11] Phaser エンジン初期化');
     expect(out).toMatch(/進行中/);
     expect(out).toContain('OK 完了');
     expect(out).toContain('12秒'); // formatted duration
@@ -89,7 +90,78 @@ describe('ProgressReporter', () => {
       const h = nullProgressReporter.taskStart(1, 1, 'z');
       h.complete();
       h.fail('fail');
+      h.heartbeat({ hint: 'llm', elapsedMs: 0 });
+      nullProgressReporter.taskSkipped(1, 1, 'z', 'skipped');
+      nullProgressReporter.roadmapOverview([], 0);
+      nullProgressReporter.reconcileNote([], []);
       nullProgressReporter.preview('content');
     }).not.toThrow();
+  });
+
+  // ---- Phase 7.8.12 ---------------------------------------------------------
+
+  it('heartbeat renders elapsed seconds + hint label and escalates past 2 minutes', () => {
+    const { stream, read } = collectStream();
+    const r = createProgressReporter({ stream, color: false, icons: false });
+    const h = r.taskStart(1, 9, 'Sprint 1/3: Programmer');
+    h.heartbeat({ elapsedMs: 15_000, hint: 'llm' });
+    h.heartbeat({ elapsedMs: 45_000, hint: 'image' });
+    h.heartbeat({ elapsedMs: 150_000, hint: 'audio' }); // > 2 min → yellow
+    const out = read();
+    expect(out).toMatch(/進行中 \(経過 15秒, LLM 呼び出し中\)/);
+    expect(out).toMatch(/進行中 \(経過 45秒, 画像生成中\)/);
+    expect(out).toMatch(/進行中 \(経過 2分30秒, 音声生成中\)/);
+  });
+
+  it('each heartbeat hint variant maps to the expected Japanese label', () => {
+    const { stream, read } = collectStream();
+    const r = createProgressReporter({ stream, color: false, icons: false });
+    const h = r.taskStart(1, 1, 'stage');
+    h.heartbeat({ elapsedMs: 1_000, hint: 'llm' });
+    h.heartbeat({ elapsedMs: 1_000, hint: 'build' });
+    h.heartbeat({ elapsedMs: 1_000, hint: 'test' });
+    h.heartbeat({ elapsedMs: 1_000, hint: 'image' });
+    h.heartbeat({ elapsedMs: 1_000, hint: 'audio' });
+    const out = read();
+    expect(out).toContain('LLM 呼び出し中');
+    expect(out).toContain('ビルド中');
+    expect(out).toContain('テスト実行中');
+    expect(out).toContain('画像生成中');
+    expect(out).toContain('音声生成中');
+  });
+
+  it('taskSkipped prints a single line with the reason', () => {
+    const { stream, read } = collectStream();
+    const r = createProgressReporter({ stream, color: false, icons: false });
+    r.taskSkipped(2, 9, 'Architect', 'design.md 既存');
+    const out = read();
+    expect(out).toContain('[ 2/9] Architect');
+    expect(out).toContain('スキップ (design.md 既存)');
+  });
+
+  it('roadmapOverview renders one row per group with aligned padding', () => {
+    const { stream, read } = collectStream();
+    const r = createProgressReporter({ stream, color: false, icons: false });
+    r.roadmapOverview(
+      [
+        { phase: 'Setup', taskIds: ['task-001', 'task-002'] },
+        { phase: 'Core', taskIds: ['task-003', 'task-004'] },
+      ],
+      4,
+    );
+    const out = read();
+    expect(out).toContain('ロードマップ (4 タスク):');
+    expect(out).toMatch(/Setup\s+> task-001 task-002/);
+    expect(out).toMatch(/Core\s+> task-003 task-004/);
+  });
+
+  it('reconcileNote lists completed task ids and warnings', () => {
+    const { stream, read } = collectStream();
+    const r = createProgressReporter({ stream, color: false, icons: false });
+    r.reconcileNote(['task-001', 'task-002'], ['Setup 未検出 — スキップ']);
+    const out = read();
+    expect(out).toContain('roadmap 照合: task-001');
+    expect(out).toContain('task-002');
+    expect(out).toContain('Setup 未検出 — スキップ');
   });
 });

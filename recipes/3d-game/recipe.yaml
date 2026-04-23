@@ -80,3 +80,9 @@ assets:
     budget:
       maxUsd: 0.50
       maxCount: 5
+
+# Phase 7.8.11: 3d-game is comparable in complexity to 2d-game (both run
+# artist + sound + critic). Matches 2d-game defaults.
+defaults:
+  budgetUsd: 3.50
+  assetBudgetUsd: 1.50

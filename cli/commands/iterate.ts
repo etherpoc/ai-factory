@@ -39,6 +39,7 @@ import {
   type WorkspaceDiff,
 } from '../utils/snapshot.js';
 import { BudgetTracker, budgetedStrategy } from './_run-helpers.js';
+import { describeBudget, resolveBudgetUsd } from '../utils/budget-resolve.js';
 
 const execAsync = promisify(exec);
 
@@ -124,17 +125,42 @@ export async function runIterate(
   }
 
   // ---- 5. Budget + iteration caps --------------------------------------
-  const budgetUsd = Math.max(
-    0.01,
-    opts.budgetUsd !== undefined ? Number.parseFloat(opts.budgetUsd) : cfg.budget_usd ?? 2.0,
-  );
+  // Phase 7.8.11: recipe-aware budget resolution (CLI > recipe.defaults > config > built-in).
+  const resolvedBudget = resolveBudgetUsd({
+    ...(opts.budgetUsd !== undefined ? { cliFlag: opts.budgetUsd } : {}),
+    recipe,
+    config: cfg,
+  });
+  const budgetUsd = resolvedBudget.usd;
+  logger.info('budget resolved', {
+    usd: budgetUsd,
+    source: resolvedBudget.source,
+    recipeDefault: recipe.defaults?.budgetUsd,
+  });
+  process.stderr.write(colors.dim(`  budget: ${describeBudget(resolvedBudget, recipe.meta.type)}\n`));
   // Per additional proposal 2: iterate defaults to 1, not cfg.max_iterations.
   const maxIter = Math.max(
     1,
     opts.maxIterations !== undefined ? Number.parseInt(opts.maxIterations, 10) : 1,
   );
 
-  const tracker = new BudgetTracker(budgetUsd, logger);
+  const tracker = new BudgetTracker(budgetUsd, logger, {
+    ...(recipe.defaults?.budgetUsd !== undefined
+      ? { recipeSuggestedUsd: recipe.defaults.budgetUsd }
+      : {}),
+    onWarn: (ev) => {
+      process.stderr.write(
+        colors.yellow(
+          `⚠ 予算 ${ev.thresholdPct}% 到達: $${ev.totalUsd.toFixed(4)} / $${ev.limitUsd.toFixed(2)}\n`,
+        ),
+      );
+      logger.warn('budget.threshold', {
+        thresholdPct: ev.thresholdPct,
+        totalUsd: ev.totalUsd,
+        limitUsd: ev.limitUsd,
+      });
+    },
+  });
 
   // ---- 6. Snapshot BEFORE (hash + physical) -----------------------------
   process.stderr.write(colors.dim('→ snapshotting workspace...\n'));

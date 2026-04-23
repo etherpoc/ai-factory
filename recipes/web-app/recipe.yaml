@@ -79,3 +79,9 @@ assets:
     budget:
       maxUsd: 0.50
       maxCount: 5
+
+# Phase 7.8.11: web-app is lighter than game recipes (artist limited to OG
+# image, no sound). $2.00 typical + $0.50 for one image.
+defaults:
+  budgetUsd: 2.00
+  assetBudgetUsd: 0.50

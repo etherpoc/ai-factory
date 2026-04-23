@@ -126,6 +126,82 @@ uaf create "CSV 整形 CLI" --recipe cli --no-spec --budget-usd 0.50 --max-itera
 6. 完了時、全 roadmap タスクを `completed`、`phase='complete'`、`resumable=false`
 7. SIGINT があれば `phase='interrupted'`、`resumable=true`、`uaf resume <id>` で再開可能
 
+### 予算の自動解決 (Phase 7.8.11)
+
+`--budget-usd` を明示しなかった場合、次の優先順位で解決される:
+
+| 順位 | ソース | 例 |
+|---|---|---|
+| 1 | `--budget-usd` CLI フラグ | `uaf create "..." --budget-usd 5.0` |
+| 2 | `recipe.defaults.budgetUsd`（レシピ作者推奨値）| `recipes/2d-game/recipe.yaml: defaults.budgetUsd` |
+| 3 | `~/.uaf/config.yaml` `budget_usd`（ユーザーグローバル設定）| |
+| 4 | 組込デフォルト `$2.00` | |
+
+Phase 7.8.11 時点の recipe 別デフォルト:
+
+| Recipe | budgetUsd | assetBudgetUsd | 根拠 |
+|---|---|---|---|
+| 2d-game | $3.50 | $1.50 | Phase 7.8.12 実測 $2.44 halt + artist 失敗時余裕 |
+| 3d-game | $3.50 | $1.50 | 2d-game と同等 |
+| web-app | $2.00 | $0.50 | artist/sound 軽め、OG 画像程度 |
+| mobile-app | $2.50 | $0.50 | 中間規模（native bridging + Expo install 重め）|
+| desktop-app | $2.50 | $0.50 | 中間規模（Electron main/renderer 分離）|
+| cli | $0.80 | $0.00 | creative 系なし、単純機能 |
+| api | $1.20 | $0.00 | cli より複雑、programmer 1 回 + 余裕 |
+
+実行時に `budget: $3.50 (recipe defaults, 2d-game)` のように適用ソースが表示される。
+
+### 予算進行警告 (Phase 7.8.11)
+
+累積コストが予算の **50%** / **80%** に到達した時点で `⚠ 予算 50% 到達: $1.75 / $3.50` の警告を出力（1 予算につき各しきい値で 1 回のみ、重複なし）。BudgetTracker の pre-check 方式により、単一 LLM 呼び出しが予算を大きく超えることがある（call 前は $0.40、call 後は $0.90 等）ので、この警告はその一歩手前の「まだ調整できる」タイミングで出す設計。
+
+### 予算超過時の次回推奨 (Phase 7.8.11)
+
+`BUDGET_EXCEEDED` エラーの hint に次の形式で「次回試すべき予算」を提示:
+
+```
+Retry with --budget-usd 3.50 (recipe default: $3.50, spent $2.44 before halt).
+or relax per-role models in ~/.uaf/config.yaml.
+```
+
+推奨値は `max(recipe.defaults.budgetUsd, ceil(実コスト × 2.4) / 2)` の式で算出（今回の消費に 2.4 倍のバッファ、$0.50 刻みで切上げ）。
+
+### 進捗表示 (Phase 7.8.12)
+
+build phase 中、各 orchestrator ステージを `[N/total]` 形式で逐次表示する。単一の「build phase (orchestrator)」で 20 分沈黙する旧挙動は廃止:
+
+```
+🔨 実装を開始します
+
+ロードマップ (12 タスク):
+  Setup  ▸ task-001 task-002
+  Core   ▸ task-003 task-004 task-005 task-006 task-007
+  Polish ▸ task-008 task-009 task-010 task-011
+  Verify ▸ task-012
+
+[ 1/21] Director           ✓ スキップ (spec.md 既存)
+[ 2/21] Architect          ✓ スキップ (design.md 既存)
+[ 3/21] Scaffold           ✓ 完了 (0.8秒)
+                           ▸ roadmap 照合: task-001 ✓, task-002 ✓
+[ 4/21] Creative           ↳ Writer
+                           ↳ Artist
+                           ↳ Sound
+                           ✓ 完了 (3分22秒)
+[ 5/21] Sprint 1/3: Programmer  ⠋ 進行中 (経過 15秒, LLM 呼び出し中)
+                                ⠋ 進行中 (経過 30秒, LLM 呼び出し中)
+                                ⠋ 進行中 (経過 45秒, LLM 呼び出し中)
+                                ✓ 完了 (48秒, overall 95)
+[ 6/21] Sprint 1/3: Build       ⠋ 進行中 (ビルド中)
+                                ✓ 完了 (4秒, build OK)
+...
+```
+
+- **heartbeat**: 15 秒ごとに `進行中 (経過 Nsec, <hint>)` を追記。2 分を越えると dim → yellow に昇格して視認性が上がる
+- **hint 種別**: `LLM 呼び出し中` / `ビルド中` / `テスト実行中` / `画像生成中` / `音声生成中` の 5 種。`generate_image` / `generate_audio` tool-use が発火したタイミングで自動切替
+- **roadmap 照合**: scaffold 完了時に `package.json` が書かれていれば、Setup フェーズのタスクを自動で `completed` マーク。マッチしないと `reconcileNote` で warning 表示
+- **skipped**: spec.md / design.md / package.json が既にある phase は `スキップ (<理由>)` の 1 行で表示（resume 時に有用）
+- **`--log-stream`** フラグで旧来の JSON ストリーム動作に復元可能
+
 ### 挙動 (--no-spec legacy)
 
 Phase 7.8 以前と同じ。Director → Architect → Scaffold → ループ。state.json に `phase` / `roadmap` を書かない。`uaf resume` の対象外。

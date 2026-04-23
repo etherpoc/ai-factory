@@ -16,22 +16,74 @@ import type { Usage, WrapContext } from '../../core/metrics.js';
 import { computeCost } from '../../core/pricing.js';
 import { UafError } from '../ui/errors.js';
 
+export interface BudgetWarnEvent {
+  /** Threshold percentage that was just crossed (50 or 80). */
+  thresholdPct: number;
+  /** Actual cumulative spend at the time of the warning. */
+  totalUsd: number;
+  limitUsd: number;
+  /** What recipe default (if any) would prevent this being tight. */
+  recipeSuggestedUsd?: number;
+}
+
+export interface BudgetTrackerOptions {
+  /**
+   * Phase 7.8.11: called once per threshold when cumulative spend first
+   * crosses that threshold. Default thresholds: 50% and 80%. Each threshold
+   * fires at most once per run.
+   */
+  onWarn?: (ev: BudgetWarnEvent) => void;
+  /** Override thresholds (percentages). Default `[50, 80]`. */
+  warnThresholdsPct?: readonly number[];
+  /** Attached to warn events for the halt hint. */
+  recipeSuggestedUsd?: number;
+}
+
 export class BudgetTracker {
   totalUsd = 0;
   calls = 0;
+  private readonly warnedPct = new Set<number>();
+  private readonly warnThresholds: readonly number[];
   constructor(
     readonly limitUsd: number,
     private readonly logger: Logger,
-  ) {}
+    private readonly options: BudgetTrackerOptions = {},
+  ) {
+    this.warnThresholds = (options.warnThresholdsPct ?? [50, 80])
+      .filter((p) => p > 0 && p < 100)
+      .slice()
+      .sort((a, b) => a - b);
+  }
 
   preCheck(): void {
     if (this.totalUsd >= this.limitUsd) {
+      const suggestion = this.options.recipeSuggestedUsd;
+      // Round the suggestion up to the next $0.50 to give the user a bit of
+      // headroom — recipe defaults are tuned for typical runs, not the one
+      // that just went over.
+      const nextBudget = suggestion
+        ? Math.max(suggestion, Math.ceil(this.totalUsd * 2.4) / 2)
+        : undefined;
+      const hintParts: string[] = [];
+      if (nextBudget !== undefined) {
+        hintParts.push(
+          `Retry with --budget-usd ${nextBudget.toFixed(2)} (recipe default: $${suggestion!.toFixed(2)}, spent $${this.totalUsd.toFixed(4)} before halt).`,
+        );
+      } else {
+        hintParts.push('Raise --budget-usd');
+      }
+      hintParts.push('or relax per-role models in ~/.uaf/config.yaml.');
       throw new UafError(
         `budget exceeded: $${this.totalUsd.toFixed(4)} >= $${this.limitUsd.toFixed(2)}`,
         {
           code: 'BUDGET_EXCEEDED',
-          details: { totalUsd: +this.totalUsd.toFixed(4), limitUsd: this.limitUsd },
-          hint: 'Raise --budget-usd or relax per-role models in ~/.uaf/config.yaml.',
+          details: {
+            totalUsd: +this.totalUsd.toFixed(4),
+            limitUsd: this.limitUsd,
+            ...(suggestion !== undefined ? { recipeSuggestedUsd: suggestion } : {}),
+            ...(nextBudget !== undefined ? { suggestedNextUsd: +nextBudget.toFixed(2) } : {}),
+          },
+          hint: hintParts.join(' '),
         },
       );
     }
@@ -52,6 +104,26 @@ export class BudgetTracker {
       totalUsd: +this.totalUsd.toFixed(5),
       limitUsd: this.limitUsd,
     });
+
+    // Phase 7.8.11: threshold warnings. Fire each threshold at most once per
+    // run — duplicate firings spam the UX. Threshold crossings are monotonic
+    // (we only compare totalUsd which never decreases) so order is stable.
+    if (this.limitUsd > 0 && this.options.onWarn) {
+      const pct = (this.totalUsd / this.limitUsd) * 100;
+      for (const threshold of this.warnThresholds) {
+        if (pct >= threshold && !this.warnedPct.has(threshold)) {
+          this.warnedPct.add(threshold);
+          this.options.onWarn({
+            thresholdPct: threshold,
+            totalUsd: +this.totalUsd.toFixed(4),
+            limitUsd: this.limitUsd,
+            ...(this.options.recipeSuggestedUsd !== undefined
+              ? { recipeSuggestedUsd: this.options.recipeSuggestedUsd }
+              : {}),
+          });
+        }
+      }
+    }
   }
 }
 

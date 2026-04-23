@@ -149,3 +149,9 @@ assets:
     budget:
       maxUsd: 0.30
       maxCount: 3
+
+# Phase 7.8.11: mobile-app is mid-complexity — native bridging + Expo install
+# is heavier than web-app but creative scope is smaller. $2.50 + $0.50 icons.
+defaults:
+  budgetUsd: 2.50
+  assetBudgetUsd: 0.50

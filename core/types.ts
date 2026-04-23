@@ -182,6 +182,21 @@ export interface Recipe {
   // Phase 11.a additions — both optional for backward compatibility.
   agents?: AgentsSpec;
   assets?: AssetsSpec;
+  /**
+   * Phase 7.8.11: recipe-authored defaults for CLI flags that historically
+   * defaulted to `2.0` regardless of project type. A 2d-game usually needs
+   * $3.50 to complete while a cli tool needs $0.80 — baking that knowledge
+   * into the recipe avoids surprise halts from the old one-size-fits-all
+   * default. Optional for backward compat with pre-7.8.11 recipes.
+   */
+  defaults?: RecipeDefaults;
+}
+
+export interface RecipeDefaults {
+  /** Default for `--budget-usd` when neither CLI flag nor user config sets it. */
+  budgetUsd?: number;
+  /** Default for `--asset-budget-usd`. 0 disables artist/sound entirely. */
+  assetBudgetUsd?: number;
 }
 
 /**
@@ -275,6 +290,103 @@ export interface CircuitBreakerState {
   tripped: boolean;
   tripReason?: string;
 }
+
+// ---------------------------------------------------------------------------
+// Progress signals (Phase 7.8.12)
+//
+// Orchestrator emits these events at every agent/stage boundary so a UI layer
+// (CLI progress reporter) can render fine-grained feedback without the
+// orchestrator knowing anything about terminal output. All fields are
+// display-grade; no code should branch on them.
+// ---------------------------------------------------------------------------
+
+export type ProgressPhase =
+  | 'director'
+  | 'architect'
+  | 'scaffold'
+  | 'creative'
+  | 'creative-agent'
+  | 'sprint'
+  | 'sprint-stage';
+
+export type SprintStage =
+  | 'programmer'
+  | 'build'
+  | 'tester'
+  | 'critic'
+  | 'reviewer'
+  | 'evaluator';
+
+export type HeartbeatHint = 'llm' | 'build' | 'test' | 'image' | 'audio';
+
+export type ProgressEvent =
+  | { kind: 'phase-start'; phase: Exclude<ProgressPhase, 'creative-agent' | 'sprint-stage'>; label: string }
+  | {
+      kind: 'phase-end';
+      phase: Exclude<ProgressPhase, 'creative-agent' | 'sprint-stage'>;
+      ok: boolean;
+      durationMs: number;
+      note?: string;
+    }
+  | {
+      kind: 'phase-skipped';
+      phase: 'director' | 'architect' | 'scaffold';
+      reason: string;
+    }
+  | { kind: 'creative-agent-start'; role: 'writer' | 'artist' | 'sound'; label: string }
+  | {
+      kind: 'creative-agent-end';
+      role: 'writer' | 'artist' | 'sound';
+      ok: boolean;
+      durationMs: number;
+      errorMessage?: string;
+    }
+  | { kind: 'sprint-start'; sprint: number; maxSprints: number }
+  | {
+      kind: 'sprint-stage-start';
+      sprint: number;
+      stage: SprintStage;
+      label: string;
+    }
+  | {
+      kind: 'sprint-stage-end';
+      sprint: number;
+      stage: SprintStage;
+      ok: boolean;
+      durationMs: number;
+      note?: string;
+    }
+  | {
+      kind: 'sprint-end';
+      sprint: number;
+      done: boolean;
+      overall: number;
+    }
+  | { kind: 'hint'; hint: HeartbeatHint }
+  | {
+      kind: 'reconcile';
+      /** Tasks that were marked completed because of on-disk evidence. */
+      completedTaskIds: string[];
+      /** Non-fatal notes (e.g. "no Setup-phase task matched scaffold"). */
+      warnings: string[];
+    }
+  | {
+      kind: 'roadmap-overview';
+      /** Ordered group list with task ids per group, for the bird's-eye view. */
+      groups: { phase: string; taskIds: string[] }[];
+      totalTasks: number;
+    };
+
+export interface ProgressSink {
+  emit(event: ProgressEvent): void;
+}
+
+/** No-op sink — used when the orchestrator is run without a UI. */
+export const nullProgressSink: ProgressSink = {
+  emit() {
+    /* no-op */
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Metrics (R5)

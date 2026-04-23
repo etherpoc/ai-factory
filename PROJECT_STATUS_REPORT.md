@@ -1,8 +1,8 @@
 # Universal Agent Factory — プロジェクト現状レポート
 
-**レポート作成日**: 2026年4月23日（最終更新: Phase 7.8.10 — 使用期間初日 UX 改善）
+**レポート作成日**: 2026年4月23日（最終更新: Phase 7.8.11 — レシピ別デフォルト予算、使用期間 D+1）
 **プロジェクト名**: `universal-agent-factory` (作業ディレクトリ: `C:\Users\ether\workspace\ai-factory`)
-**現在フェーズ**: **Phase 7.8.10 完了、使用期間継続中**
+**現在フェーズ**: **Phase 7.8.11 完了、2048 初の完全自動完走、使用期間継続中**
 
 ---
 
@@ -26,11 +26,13 @@
   2. 進捗不透明性 → roadmap.md + state.json.roadmap + `uaf status`
   3. 中断への脆さ → atomic write + SIGINT ハンドラ + `uaf resume`
   4. プレビューの面倒さ → `uaf preview` で 7 レシピ別に自動起動
-- 累計テスト **478 件**グリーン（Phase 11.a 時点 376 → Phase 7.8 で +86 件 → Phase 7.8.9 で +3 件 → Phase 7.8.10 で +13 件）
+- 累計テスト **533 件**グリーン（Phase 11.a 時点 376 → Phase 7.8 で +86 件 → Phase 7.8.9 で +3 件 → Phase 7.8.10 で +13 件 → Phase 7.8.12 で +28 件 → Phase 7.8.11 で +27 件）
 - `uaf` CLI **14 コマンド**完動（既存 10 + status / resume / preview / logs）
 - **E2E 実機検証 16/16 pass**（`scripts/e2e-phase7-8.ts`、Sonnet + Haiku、Opus 0 calls）
 - **Phase 7.8.9**: spec.md 対話修正モード（`e → 1` で interviewer REVISE 起動、実 LLM 試走で指示通りの差分修正を確認、非該当セクションは一字一句保持）
 - **Phase 7.8.10 (UX 改善)**: 構造化ログを `workspace/<pid>/logs/<cmd>.log` にファイル出力（対話中に pino が画面を汚さない）、`cli/ui/progress.ts` で人間向け進捗表示（アイコン・区切り線・経過秒）、`uaf logs` で事後参照（tail / follow / filter / raw / cmd）、`--log-stream` で従来のストリーム動作に復元可能
+- **Phase 7.8.12 (進捗表示の根本修正)**: resume 中の 20 分沈黙問題を解消。`core/types.ts` に `ProgressEvent` / `ProgressSink` 追加、orchestrator が 10 種のイベント（phase-start/end, phase-skipped, sprint-start/end, sprint-stage-start/end, creative-agent-start/end, hint, reconcile, roadmap-overview）を発火。`cli/progress-bridge.ts` が 15 秒間隔の heartbeat タイマで進捗を表示（2 分超で dim → yellow）。hint 5 種（LLM / ビルド / テスト / 画像 / 音声）で活動を視認化。`core/roadmap-reconcile.ts` が scaffold 後に Setup フェーズタスクを自動 complete マーク。`claude` strategy に `onToolStart` コールバック追加で画像/音声 tool-use を即時 hint 化
+- **Phase 7.8.11 (レシピ別デフォルト予算)**: 7 レシピに `defaults.budgetUsd` / `defaults.assetBudgetUsd` を追加（2d-game/3d-game: $3.50+$1.50、web-app: $2.00+$0.50、mobile-app/desktop-app: $2.50+$0.50、cli: $0.80+$0.00、api: $1.20+$0.00）。`cli/utils/budget-resolve.ts` で **CLI > recipe.defaults > user-config > built-in** の優先順位で自動解決。BudgetTracker に 50%/80% しきい値警告 + halt 時の「次回推奨予算」ヒント (`--budget-usd <max(recipe, 超過額×2.4 round-up)>`) を追加。create/resume/iterate が全て新解決ロジック経由に移行。**実機検証**: halt していた 2048 プロジェクトが `uaf resume --yes` (引数なし → 自動で $3.50 適用) で 9 分で完全自動完走、12/12 タスク completed、overall=100/100、dist/ ビルド成功、Playwright テスト 1/1 pass、dev server で実ゲーム起動確認
 
 ### 現在のステータス
 
@@ -250,6 +252,8 @@ User Request
 | 6 | レシピ拡充（cli, api, 3d-game, mobile-app, desktop-app） | ✅ 完了 |
 | 7 | CLI & DX（`uaf` 10 コマンド） | ✅ 完了 |
 | **7.8** | **Spec-Roadmap-Resume-Preview (13 コマンド体制)** | ✅ **完了 (2026-04-23)** |
+| **7.8.12** | **進捗表示の根本修正 (ProgressSink + heartbeat + roadmap 証跡照合)** | ✅ **完了 (2026-04-23)** |
+| **7.8.11** | **レシピ別デフォルト予算 + しきい値警告 + 次回予算ヒント** | ✅ **完了 (2026-04-23)** |
 | 8 | ビルド・パッケージング | ⏳ 未着手 |
 | 9 | デプロイ・公開自動化 | ⏳ 未着手 |
 | 10 | ストア公開支援 | ⏳ 未着手 |
@@ -404,6 +408,16 @@ Phase 5 以降、全 metrics.jsonl で claude-opus の呼び出し **0 件**を�
 | JSON 風ログがリアルタイムで読みづらい | `uaf logs <pid>` で後から整形表示（レベル別色分け・メタデータ除去）|
 | 進捗が分からない | `cli/ui/progress.ts` で phase / step / task を視認性高く表示 |
 | 従来動作に戻したい場合 | `--log-stream` フラグで JSON ストリームを復元（CI では自動適用）|
+
+### Phase 7.8.12 で解決した課題（使用期間 D+1 発見）
+
+| 課題 | 解決策 |
+|---|---|
+| resume 中に build phase 全体が `[1/1]` に丸まって 20 分以上沈黙 | orchestrator が `ProgressSink` へ phase/sprint-stage 単位のイベントを発火、CLI 側 `progress-bridge` が `[N/total]` 形式で逐次表示 |
+| 長時間タスク中に「止まっているのか動いているのか」分からない | 15 秒間隔の heartbeat（経過秒表示、2 分超で dim → yellow に昇格） |
+| 画像/音声生成中が LLM 待ちと区別できない | `claude` strategy に `onToolStart` 追加、`generate_image` / `generate_audio` が hint:image / hint:audio を即時発火 |
+| ロードマップのどこまで進んだか分からない | build phase 開始時に bird-eye view（`Setup ▸ task-001 task-002`…）表示、scaffold 後に `package.json` 証跡で Setup タスク自動 complete マーク |
+| resume 時にどの phase がスキップされるか見えない | phase-skipped イベントで `✓ スキップ (spec.md 既存)` 等を即座に 1 行表示 |
 
 ---
 

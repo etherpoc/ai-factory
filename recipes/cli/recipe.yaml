@@ -121,3 +121,9 @@ evaluation:
 agents:
   required: [director, architect, programmer, tester, reviewer, evaluator]
   optional: [writer]
+
+# Phase 7.8.11: cli is the lightest recipe — no creative agents beyond writer
+# and a tight programmer surface. $0.80 fits simple tools comfortably.
+defaults:
+  budgetUsd: 0.80
+  assetBudgetUsd: 0.00
