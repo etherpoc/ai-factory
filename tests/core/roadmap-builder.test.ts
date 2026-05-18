@@ -10,7 +10,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   RoadmapBuilderError,
   buildRoadmap,
@@ -21,6 +22,8 @@ import { MetricsRecorder } from '../../core/metrics.js';
 import { nullLogger } from '../../core/logger.js';
 import type { AgentStrategy } from '../../core/agent-factory.js';
 import type { Recipe, Tool, ToolContext } from '../../core/types.js';
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 let repoRoot: string;
 let workspace: string;
@@ -282,5 +285,48 @@ describe('buildRoadmap — end to end (fake strategy)', () => {
         minTasks: 4,
       }),
     ).rejects.toThrow(/cycle/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 7.8.13 — prompt structure guard
+//
+// The agent historically produced the JSON envelope but skipped
+// `write_file('roadmap.md', …)`, which the orchestrator then flagged with
+// `roadmap-builder did not produce roadmap.md (write_file was not called)`.
+// This mirrors the Phase 11.a.6 Critic regression. Fix was to promote the
+// write_file directive to a top-level `必須の出力（最優先）` section so the
+// model sees it before the role/format prose. These tests lock that
+// structure in so future edits can't accidentally demote it back.
+// ---------------------------------------------------------------------------
+
+describe('roadmap-builder prompt structure (Phase 7.8.13)', () => {
+  let promptText: string;
+  beforeEach(async () => {
+    promptText = await readFile(
+      join(REPO_ROOT, 'agents', 'roadmap-builder', 'prompt.md'),
+      'utf8',
+    );
+  });
+
+  it('has a top-level "必須の出力（最優先）" section', () => {
+    expect(promptText).toMatch(/^##\s+必須の出力（最優先）/m);
+  });
+
+  it('places the mandatory-output section before the role section', () => {
+    const mandatoryIdx = promptText.indexOf('## 必須の出力（最優先）');
+    const roleIdx = promptText.indexOf('## 役割');
+    expect(mandatoryIdx).toBeGreaterThan(-1);
+    expect(roleIdx).toBeGreaterThan(-1);
+    expect(mandatoryIdx).toBeLessThan(roleIdx);
+  });
+
+  it("explicitly names write_file('roadmap.md', ...) as required", () => {
+    expect(promptText).toMatch(/write_file\(\s*['"]roadmap\.md['"]/);
+  });
+
+  it('warns that a JSON-only response is insufficient', () => {
+    expect(promptText).toMatch(/テキスト応答|JSON.{0,20}だけ/);
+    expect(promptText).toMatch(/halt|責務を果たして/);
   });
 });

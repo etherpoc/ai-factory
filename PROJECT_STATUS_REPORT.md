@@ -1,8 +1,8 @@
 # Universal Agent Factory — プロジェクト現状レポート
 
-**レポート作成日**: 2026年4月23日（最終更新: Phase 7.8.11 — レシピ別デフォルト予算、使用期間 D+1）
+**レポート作成日**: 2026年4月23日（最終更新: 2026-04-24 Phase 7.8.13 — roadmap-builder tool-use 強化、使用期間 D+2）
 **プロジェクト名**: `universal-agent-factory` (作業ディレクトリ: `C:\Users\ether\workspace\ai-factory`)
-**現在フェーズ**: **Phase 7.8.11 完了、2048 初の完全自動完走、使用期間継続中**
+**現在フェーズ**: **Phase 7.8.13 完了、roadmap-builder 信頼性向上、使用期間継続中**
 
 ---
 
@@ -26,13 +26,14 @@
   2. 進捗不透明性 → roadmap.md + state.json.roadmap + `uaf status`
   3. 中断への脆さ → atomic write + SIGINT ハンドラ + `uaf resume`
   4. プレビューの面倒さ → `uaf preview` で 7 レシピ別に自動起動
-- 累計テスト **533 件**グリーン（Phase 11.a 時点 376 → Phase 7.8 で +86 件 → Phase 7.8.9 で +3 件 → Phase 7.8.10 で +13 件 → Phase 7.8.12 で +28 件 → Phase 7.8.11 で +27 件）
+- 累計テスト **537 件**グリーン（Phase 11.a 時点 376 → Phase 7.8 で +86 件 → Phase 7.8.9 で +3 件 → Phase 7.8.10 で +13 件 → Phase 7.8.12 で +28 件 → Phase 7.8.11 で +27 件 → Phase 7.8.13 で +4 件）
 - `uaf` CLI **14 コマンド**完動（既存 10 + status / resume / preview / logs）
 - **E2E 実機検証 16/16 pass**（`scripts/e2e-phase7-8.ts`、Sonnet + Haiku、Opus 0 calls）
 - **Phase 7.8.9**: spec.md 対話修正モード（`e → 1` で interviewer REVISE 起動、実 LLM 試走で指示通りの差分修正を確認、非該当セクションは一字一句保持）
 - **Phase 7.8.10 (UX 改善)**: 構造化ログを `workspace/<pid>/logs/<cmd>.log` にファイル出力（対話中に pino が画面を汚さない）、`cli/ui/progress.ts` で人間向け進捗表示（アイコン・区切り線・経過秒）、`uaf logs` で事後参照（tail / follow / filter / raw / cmd）、`--log-stream` で従来のストリーム動作に復元可能
 - **Phase 7.8.12 (進捗表示の根本修正)**: resume 中の 20 分沈黙問題を解消。`core/types.ts` に `ProgressEvent` / `ProgressSink` 追加、orchestrator が 10 種のイベント（phase-start/end, phase-skipped, sprint-start/end, sprint-stage-start/end, creative-agent-start/end, hint, reconcile, roadmap-overview）を発火。`cli/progress-bridge.ts` が 15 秒間隔の heartbeat タイマで進捗を表示（2 分超で dim → yellow）。hint 5 種（LLM / ビルド / テスト / 画像 / 音声）で活動を視認化。`core/roadmap-reconcile.ts` が scaffold 後に Setup フェーズタスクを自動 complete マーク。`claude` strategy に `onToolStart` コールバック追加で画像/音声 tool-use を即時 hint 化
 - **Phase 7.8.11 (レシピ別デフォルト予算)**: 7 レシピに `defaults.budgetUsd` / `defaults.assetBudgetUsd` を追加（2d-game/3d-game: $3.50+$1.50、web-app: $2.00+$0.50、mobile-app/desktop-app: $2.50+$0.50、cli: $0.80+$0.00、api: $1.20+$0.00）。`cli/utils/budget-resolve.ts` で **CLI > recipe.defaults > user-config > built-in** の優先順位で自動解決。BudgetTracker に 50%/80% しきい値警告 + halt 時の「次回推奨予算」ヒント (`--budget-usd <max(recipe, 超過額×2.4 round-up)>`) を追加。create/resume/iterate が全て新解決ロジック経由に移行。**実機検証**: halt していた 2048 プロジェクトが `uaf resume --yes` (引数なし → 自動で $3.50 適用) で 9 分で完全自動完走、12/12 タスク completed、overall=100/100、dist/ ビルド成功、Playwright テスト 1/1 pass、dev server で実ゲーム起動確認
+- **Phase 7.8.13 (roadmap-builder tool-use 強化)**: `uaf create` 中に `roadmap-builder did not produce roadmap.md (write_file was not called)` で halt する事例が発生。Phase 11.a.6 の Critic と同系統（LLM が構造化ファイル書き出しツールを呼ばず text 応答だけで終える）の問題で、F18 により既に Sonnet 4.6 固定だったためモデル変更は不要。`agents/roadmap-builder/prompt.md` の冒頭（`## 役割` の前）に `## 必須の出力（最優先）` セクションを追加し、Critic プロンプトと同語彙で「write_file を呼ばずに応答を終えることは責務を果たしていないとみなす／orchestrator は halt する」まで明記。末尾「厳守事項（再掲）」にも write_file 必須を先頭項目として追加。`scripts/trial-roadmap.ts` を新設（事前用意した spec.md を読ませて `buildRoadmap()` だけを叩く最小スクリプト）し、実 LLM で 2 回試走 → 2/2 で roadmap.md 生成成功（各 $0.07/$0.05、25〜30 秒、タスク 11〜12 件）。プロンプト構造 drift を防ぐ回帰テスト 4 件を `tests/core/roadmap-builder.test.ts` に追加（`describe('roadmap-builder prompt structure (Phase 7.8.13)')`）
 
 ### 現在のステータス
 
@@ -313,6 +314,7 @@ Phase 6 完走後に「ストアに出せる成果物を作る」という真の
 |----|------|
 | **Replicate SDXL の deprecated 化** | `stability-ai/sdxl` の shortcut endpoint が 2026-04 時点で 404。Flux-schnell (`black-forest-labs/flux-schnell`) に移行。Flux は width/height でなく aspect_ratio を要求するため provider に変換ロジックを追加 |
 | **Critic の Sonnet 昇格判断 (Phase 11.a.6)** | Haiku 4.5 は tool-use 遵守が弱く、critique 内容を chat text でのみ返して `write_file('critique.md', …)` を呼ばない事例が発生。Sonnet に昇格して解決。コスト差 ~$0.30/call 増だが信頼性を優先 |
+| **roadmap-builder の tool-use 強化 (Phase 7.8.13)** | Sonnet 固定にもかかわらず `write_file('roadmap.md', …)` をスキップして JSON だけ返す事例が発生。Critic と同じパターン（構造化ファイル + text の二重出力ロール）。プロンプト冒頭に `## 必須の出力（最優先）` セクションを置く方式で 2/2 修復。教訓: tool-use 遵守は「モデル強度」と「プロンプトの見出し順序」の両輪で、F18 によるモデル固定だけでは不足 |
 | **artist の Flux-schnell 成功率** | プロンプト改善（20 単語以上、著名 IP 回避）でも 5/13 (38%) に留まる。Flux の safety filter が厳しめ。flux-dev や imagen-4-fast への切替検討候補 |
 | **Programmer の manifest 参照** | Phase 11.a.5 時点では Programmer が manifest を無視する事象発生。prompt.md に「生成済みアセットの取り込み」セクションを明示追加して解決（11.a.6） |
 | **BudgetTracker の call 中超過** | pre-check 方式のため、大きな Programmer/Artist の 1 call で $0.5 以上オーバーすることがある。現状仕様として受容 |

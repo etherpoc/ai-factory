@@ -1,0 +1,82 @@
+# UAF 設定サンプル
+#
+# 使い方:
+#   cp .uafrc.example .uafrc              # プロジェクト単位
+#   cp .uafrc.example ~/.uaf/config.yaml  # グローバル (全プロジェクト共通)
+#   → 必要な行だけ `#` を外して有効化
+#
+# 優先順（一般キー）: CLI フラグ > ./.uafrc > ~/.uaf/config.yaml > built-in
+# 未知のキーは CONFIG_INVALID (exit 4) で即失敗。不要な行は残しておいて OK。
+#
+# ⚠ budget_usd / assets.budget_usd だけ例外ルール:
+#   CLI フラグ > recipe.defaults > .uafrc > built-in
+#   レシピごとに必要額が違う（2d-game=$3.50、cli=$0.80 等）ため、
+#   recipe.defaults が user-config に勝つ設計。
+#   user-config の budget_usd は「未知レシピの fallback」として機能する。
+#   レシピの default を本当に上書きしたいときは毎回 CLI で:
+#     uaf create "..." --budget-usd 10.0 --asset-budget-usd 5.0
+
+# ─── コスト上限 ─────────────────────────────────────────
+# LLM 1 実行あたりの上限 (USD, > 0) / CLI: --budget-usd
+# ※ recipe.defaults が存在するレシピでは無視される（上記 ⚠ 参照）
+# budget_usd: 1.50
+
+# ─── オーケストレータの安全装置 ──────────────────────────
+# tester→programmer リトライの最大往復 (int > 0)
+# max_iterations: 3
+
+# エージェント 1 回あたりの tool-use round 上限 (int > 0)
+# max_rounds: 30
+
+# ─── 生成物の保管場所 ──────────────────────────────────
+# 省略時は <repo>/workspace/。~ 展開と絶対パス OK。
+# workspace_location: ~/Documents/uaf-workspace
+
+# ─── ロール別モデル上書き ────────────────────────────────
+# 省略したロールは core/strategies/claude.ts の DEFAULT_MODELS_BY_ROLE に従う
+# models:
+#   director: claude-sonnet-4-6
+#   architect: claude-sonnet-4-6
+#   programmer: claude-sonnet-4-6
+#   tester: claude-haiku-4-5
+#   reviewer: claude-haiku-4-5
+#   evaluator: claude-haiku-4-5
+#   # --- Phase 11.a creative agents ---
+#   artist: claude-sonnet-4-6
+#   sound: claude-sonnet-4-6
+#   writer: claude-sonnet-4-6
+#   critic: claude-sonnet-4-6
+#   # --- Phase 7.8 spec/roadmap agents ---
+#   interviewer: claude-sonnet-4-6
+#   roadmap-builder: claude-sonnet-4-6
+
+# ─── 分類器 ────────────────────────────────────────────
+# classifier をスキップして特定レシピに固定したいとき
+# 有効値: 2d-game / 3d-game / web-app / mobile-app / desktop-app / cli / api
+# classifier:
+#   default_type: 2d-game
+
+# ─── エディタ ──────────────────────────────────────────
+# `uaf open` / `uaf config edit` が使う。省略時は $EDITOR → OS 既定
+# editor: code
+
+# ─── 対話ウィザードの質問スキップ ────────────────────────
+# 既知の値: budget / recipe / max_iterations (未知は無視)
+# skip_prompts:
+#   - budget
+#   - recipe
+#   - max_iterations
+
+# ─── Phase 11.a: 外部アセット生成 API (creative) ─────────
+# ※ 使う場合は .env に REPLICATE_API_TOKEN / ELEVENLABS_API_KEY も必要
+# assets:
+#   # 画像/音声 API の上限 (USD, >= 0) / CLI: --asset-budget-usd
+#   # 0 にすると artist + sound が丸ごとスキップされる
+#   # ※ budget_usd と同じ例外ルール: recipe.defaults に負ける
+#   budget_usd: 1.00
+#   image:
+#     provider: replicate
+#   audio:
+#     provider: elevenlabs
+#   cache:
+#     enabled: true

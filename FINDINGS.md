@@ -1037,3 +1037,63 @@ Phase 7.8.12 の実機検証で、2d-game のデフォルト予算 $2.00 が実�
 - `BudgetTracker.preCheck` は pre-check 方式のため、recipe.defaults が「1 call で超えない程度の予算」を持つことが重要。2d-game の programmer 単一 call は実測で $0.35〜$0.82 のレンジ。$3.50 は 4〜10 回分の headroom を提供
 - `recipe.defaults` は CLI フラグに負けるので、特殊事情（予算タイト、試験的）には `--budget-usd 1.0` で上書き可能。通常運用では引数なしで recipe が賢く解決
 - user-config (`~/.uaf/config.yaml`) よりも recipe.defaults を優先する順序は妥当だった。ユーザーの global `budget_usd` は「全レシピ共通の上限」ではなく「未知レシピの fallback」として機能する
+
+---
+
+## Phase 7.8.13: roadmap-builder tool-use 強化（2026-04-24）
+
+**実施日**: 2026-04-24（使用期間 D+2）
+
+### 現象
+
+`uaf create "..."` 実行時に orchestrator が以下のエラーで halt:
+
+```
+✗ roadmap-builder did not produce roadmap.md (write_file was not called)
+```
+
+エラー源: `core/roadmap-builder.ts:123`。LLM が JSON 応答は返したが `write_file('roadmap.md', ...)` を呼ばずに終了したケース。
+
+### 根本原因
+
+Phase 11.a.6 の Critic と**完全に同系統**の問題:
+
+- **Critic (Phase 11.a.6)**: 元は Haiku 4.5 → `write_file('critique.md', ...)` を飛ばして chat text で済ませる事例 → Sonnet 4.6 昇格 + プロンプト冒頭に `## 必須の出力（最優先）` セクション追加
+- **roadmap-builder (Phase 7.8)**: 最初から Sonnet 4.6（F18 drift lock 済み）だが、プロンプトの write_file 指示が `## 厳守事項（出力ルール）` 配下の番号付き 2 番目の項目で、役割説明の後に埋もれていた。LLM は時折 read_file → JSON 返しの最短路で済ませて write_file をスキップしていた。
+
+### 対応
+
+**方針**: F18 によりモデルは既に Sonnet 固定なので、Phase 11.a.6 で効いた**プロンプト構造強化**のみを適用。
+
+1. `agents/roadmap-builder/prompt.md` の冒頭（`## 役割` の**前**）に `## 必須の出力（最優先）` セクションを追加。Critic プロンプトと同語彙で「write_file を呼ばずに応答を終えることは責務を果たしていないとみなす」「orchestrator は halt する」まで明記。
+2. 末尾「厳守事項（再掲）」にも `write_file('roadmap.md', ...) を必ず呼ぶ` を先頭項目として追加。
+
+### 検証
+
+**実 LLM 試走** (`scripts/trial-roadmap.ts`): 事前用意した spec.md を読ませて `buildRoadmap()` だけを叩く最小スクリプト。interviewer は回さない。
+
+| 回 | roadmap.md 生成 | タスク数 | LLM calls | コスト | 時間 |
+|---|---|---|---|---|---|
+| 1 | ✓ | 12 | 1 | $0.0715 | 25.3s |
+| 2 | ✓ | 11 | 1 | $0.0498 | 29.8s |
+
+2 回とも write_file 呼び出し成功。Phase 構成 (Setup / Core / Polish / Verify) も仕様通り。
+
+**回帰テスト**: `tests/core/roadmap-builder.test.ts` に `describe('roadmap-builder prompt structure (Phase 7.8.13)')` を追加。4 件:
+
+1. `## 必須の出力（最優先）` セクションが存在
+2. そのセクションが `## 役割` より**前**にある
+3. `write_file('roadmap.md', ...)` が明示的に書かれている
+4. 「JSON 応答だけでは不十分」「halt する」が警告されている
+
+プロンプト構造 drift を構造的に検出し、将来の誤編集で指示が再び埋もれるのを防ぐ。
+
+### 累計テスト
+
+533 → **537 件グリーン**（+4）。
+
+### 設計上の学び
+
+- **tool-use 遵守は「モデル強度」と「プロンプト構造」の両輪**: F18 で Sonnet に固定するだけでは不足で、指示の**順序と見出しレベル**が遵守率を左右する。冒頭に最優先セクションを置くパターン（Critic と共通）を「tool-use 必須エージェントの設計テンプレート」として横展開できる
+- **Phase 11.a.6 との類似性**: creative (critic) と planning (roadmap-builder) は役割は違うが「構造化ファイル + 短い text 応答」の二重出力という点で同型。同じ回帰を踏んだということは、interviewer（対話 → 承認 → spec.md 書き出し）にも同じリスクがある可能性。現状は `runSpecWizard` 側で spec.md 書き出しを制御しているため直接の問題は出ていないが、将来の diff で spec.md 書き出し責任がエージェント側に寄ったら同パターンの強化を検討すべき
+- **リトライ実装は不要だった**: ユーザー提案のリトライ機構 (write_file なしなら 1 回リトライ) は、プロンプト強化で 2/2 成功したため未実装。今後同系統の問題が再発した場合の一般化策として残しておく価値はあるが、過剰設計を避けて現時点では採用しない
